@@ -1,16 +1,26 @@
-# Sign Language to Text Converter
+# EduSense - Sign Language & TouchRead Application
 
-A real-time sign language recognition system that converts hand signs into text using AI, TensorFlow.js, React, Tailwind CSS, and Node.js.
+A comprehensive accessibility application featuring real-time sign language recognition and TouchRead (finger-guided reading) using AI, TensorFlow.js, React, Tailwind CSS, and Node.js.
 
 ## Features
 
-- 🎥 **Real-time Camera Detection** - Uses webcam to capture hand gestures
-- 🤖 **AI-Powered Recognition** - TensorFlow.js with MediaPipe Hands for accurate hand tracking
-- ⚡ **Live Translation** - Instant conversion of signs to text
-- 📊 **Performance Stats** - FPS monitoring and accuracy tracking
+### Sign Language Detection
+- 🤟 **Real-time ASL Recognition** - Detects all 26 ASL letters (A-Z)
+- 🎥 **Dual View** - Camera feed and hand skeleton visualization side-by-side
+- 🤖 **AI-Powered** - TensorFlow.js with HandPose model for accurate tracking
+- ⚡ **Smart Detection** - 3-second freeze for stable recognition
+- 📊 **Confidence Display** - Real-time confidence bars and gesture info
 - 🎨 **Modern UI** - Beautiful, responsive interface with Tailwind CSS
-- 🔄 **Real-time Updates** - Socket.IO for live synchronization
-- 📝 **Text Management** - Copy, clear, and manage recognized text
+- � **Text Output** - Converts gestures to readable text
+
+### TouchRead (NEW!)
+- 📖 **Finger-Guided Reading** - Point your finger at text to read it aloud
+- 🔊 **Text-to-Speech** - Automatic voice reading of highlighted text
+- 📝 **Multiple Text Sources** - Sample texts and custom text input
+- 👆 **Visual Tracking** - Real-time finger position tracking with crosshair
+- 🎯 **Precise Highlighting** - Shows exactly what's being read
+- 🎤 **Voice Control** - Adjustable speech rate and volume
+- 🌐 **Accessibility** - Helps users with reading difficulties
 
 ## Tech Stack
 

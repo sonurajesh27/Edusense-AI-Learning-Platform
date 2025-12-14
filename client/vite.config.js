@@ -5,6 +5,17 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
-    host: true
+    host: true,
+    strictPort: false,
+    hmr: {
+      clientPort: 443
+    },
+    allowedHosts: [
+      '.ngrok-free.app',
+      '.ngrok.io',
+      '.ngrok.app',
+      'localhost',
+      '127.0.0.1'
+    ]
   }
 })

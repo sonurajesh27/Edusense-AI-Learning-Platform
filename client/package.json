@@ -14,10 +14,12 @@
     "@tensorflow/tfjs": "^4.15.0",
     "axios": "^1.6.2",
     "fingerpose": "^0.1.0",
+    "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-webcam": "^7.2.0",
-    "socket.io-client": "^4.7.2"
+    "socket.io-client": "^4.7.2",
+    "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
     "@types/react": "^18.2.43",
