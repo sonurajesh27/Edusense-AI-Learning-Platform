@@ -8,12 +8,13 @@ export default defineConfig({
     host: true,
     strictPort: false,
     hmr: {
-      clientPort: 443
+      overlay: true
     },
     allowedHosts: [
       '.ngrok-free.app',
       '.ngrok.io',
       '.ngrok.app',
+      '.trycloudflare.com',
       'localhost',
       '127.0.0.1'
     ]

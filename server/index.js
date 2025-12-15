@@ -46,6 +46,9 @@ let recognitionHistory = [];
 // Store mobile camera connections
 let mobileConnections = new Map();
 
+// Store Sign2Talk users
+let sign2TalkUsers = new Map();
+
 // Store Cloudflare Tunnel URL
 let cloudflareUrl = null;
 let cloudflaredProcess = null;
@@ -127,6 +130,141 @@ io.on('connection', (socket) => {
     io.emit(`mobile-disconnected-${connectionId}`);
   });
 
+  // Sign2Talk video calling handlers
+  socket.on('sign2talk-join', (data) => {
+    const { roomId, userId } = data;
+    sign2TalkUsers.set(socket.id, { roomId, userId });
+    
+    socket.join(roomId);
+    io.to(roomId).emit('sign2talk-user-joined', { userId });
+  });
+
+  socket.on('sign2talk-leave', () => {
+    const user = sign2TalkUsers.get(socket.id);
+    if (user) {
+      const { roomId, userId } = user;
+      socket.leave(roomId);
+      sign2TalkUsers.delete(socket.id);
+      io.to(roomId).emit('sign2talk-user-left', { userId });
+    }
+  });
+
+  // Sign2Talk room management
+  socket.on('join-sign2talk', (userData) => {
+    sign2TalkUsers.set(socket.id, userData);
+    
+    // Get updated list of all online users
+    const onlineUsers = Array.from(sign2TalkUsers.values());
+    
+    // Broadcast updated user list to ALL connected clients
+    io.emit('online-users', onlineUsers);
+    
+    console.log(`✅ ${userData.userName} joined Sign2Talk. Total users: ${onlineUsers.length}`);
+  });
+
+  socket.on('leave-sign2talk', () => {
+    const user = sign2TalkUsers.get(socket.id);
+    if (user) {
+      sign2TalkUsers.delete(socket.id);
+      
+      // Get updated list after removal
+      const onlineUsers = Array.from(sign2TalkUsers.values());
+      
+      // Broadcast updated user list to ALL remaining clients
+      io.emit('online-users', onlineUsers);
+      
+      console.log(`❌ ${user.userName} left Sign2Talk. Remaining users: ${onlineUsers.length}`);
+    }
+  });
+
+  // Video calling
+  socket.on('call-user', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('incoming-call', {
+        from: data.from
+      });
+    }
+  });
+
+  socket.on('accept-call', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('call-accepted', {
+        from: data.from
+      });
+    }
+  });
+
+  socket.on('reject-call', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('call-rejected');
+    }
+  });
+
+  socket.on('end-call', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('call-ended');
+    }
+  });
+
+  // WebRTC signaling
+  socket.on('webrtc-offer', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('webrtc-offer', {
+        from: socket.id,
+        offer: data.offer
+      });
+    }
+  });
+
+  socket.on('webrtc-answer', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('webrtc-answer', {
+        from: socket.id,
+        answer: data.answer
+      });
+    }
+  });
+
+  socket.on('webrtc-ice-candidate', (data) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === data.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('webrtc-ice-candidate', {
+        from: socket.id,
+        candidate: data.candidate
+      });
+    }
+  });
+
+  // Chat messages
+  socket.on('send-message', (message) => {
+    const targetSocket = Array.from(sign2TalkUsers.entries())
+      .find(([_, user]) => user.userId === message.to)?.[0];
+    
+    if (targetSocket) {
+      io.to(targetSocket).emit('chat-message', message);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
     
@@ -138,12 +276,223 @@ io.on('connection', (socket) => {
         break;
       }
     }
+    
+    // Remove Sign2Talk user and broadcast updated list
+    const user = sign2TalkUsers.get(socket.id);
+    if (user) {
+      sign2TalkUsers.delete(socket.id);
+      
+      // Get updated list after removal
+      const onlineUsers = Array.from(sign2TalkUsers.values());
+      
+      // Broadcast updated user list to ALL remaining clients
+      io.emit('online-users', onlineUsers);
+      
+      console.log(`🔌 ${user.userName} disconnected. Remaining users: ${onlineUsers.length}`);
+    }
   });
 });
+
+// In-memory database (replace with real database in production)
+let users = [];
+let progressData = {};
+let learningActivities = {};
+let gameSessions = {};
+let achievements = {};
 
 // REST API Routes
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Sign Language Converter API is running' });
+});
+
+// Sign2Talk Online Users API - Get all online users with details
+app.get('/api/sign2talk/online-users', (req, res) => {
+  const onlineUsers = Array.from(sign2TalkUsers.values());
+  res.json({
+    success: true,
+    count: onlineUsers.length,
+    users: onlineUsers,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Sign2Talk Online Users API - Get count only
+app.get('/api/sign2talk/online-count', (req, res) => {
+  res.json({
+    success: true,
+    count: sign2TalkUsers.size,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// User Authentication APIs
+app.post('/api/auth/signup', (req, res) => {
+  const { name, email, password, role = 'student' } = req.body;
+  
+  // Check if user exists
+  if (users.find(u => u.email === email)) {
+    return res.status(400).json({ error: 'User already exists' });
+  }
+  
+  const user = {
+    id: Date.now().toString(),
+    name,
+    email,
+    role,
+    createdAt: new Date().toISOString(),
+    lastActive: new Date().toISOString()
+  };
+  
+  users.push(user);
+  
+  // Initialize progress data
+  progressData[user.id] = {
+    signLanguage: { totalSigns: 0, accuracy: 0, sessionsCompleted: 0, timeSpent: 0 },
+    touchRead: { booksRead: 0, wordsRead: 0, readingAccuracy: 0, timeSpent: 0 },
+    sign2Talk: { conversations: 0, messagesExchanged: 0, timeSpent: 0 },
+    gamifiedLearning: { gamesPlayed: 0, totalXP: 0, level: 1, badges: 0 }
+  };
+  
+  res.json({ user, token: 'dummy_token_' + user.id });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  
+  const user = users.find(u => u.email === email);
+  
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  
+  user.lastActive = new Date().toISOString();
+  
+  res.json({ user, token: 'dummy_token_' + user.id });
+});
+
+// Progress Tracking APIs
+app.get('/api/progress/:userId', (req, res) => {
+  const { userId } = req.params;
+  const data = progressData[userId] || {};
+  res.json(data);
+});
+
+app.post('/api/progress/:userId', (req, res) => {
+  const { userId } = req.params;
+  const updates = req.body;
+  
+  if (!progressData[userId]) {
+    progressData[userId] = {};
+  }
+  
+  progressData[userId] = { ...progressData[userId], ...updates };
+  res.json({ success: true, data: progressData[userId] });
+});
+
+// Learning Activity APIs
+app.post('/api/activity/:userId', (req, res) => {
+  const { userId } = req.params;
+  const activity = req.body;
+  
+  if (!learningActivities[userId]) {
+    learningActivities[userId] = [];
+  }
+  
+  learningActivities[userId].push({
+    ...activity,
+    timestamp: new Date().toISOString()
+  });
+  
+  res.json({ success: true });
+});
+
+app.get('/api/activity/:userId', (req, res) => {
+  const { userId } = req.params;
+  const activities = learningActivities[userId] || [];
+  res.json(activities);
+});
+
+// Game Session APIs
+app.post('/api/game/session', (req, res) => {
+  const { userId, gameId, score, duration, xpEarned } = req.body;
+  
+  const sessionId = Date.now().toString();
+  const session = {
+    id: sessionId,
+    userId,
+    gameId,
+    score,
+    duration,
+    xpEarned,
+    timestamp: new Date().toISOString()
+  };
+  
+  if (!gameSessions[userId]) {
+    gameSessions[userId] = [];
+  }
+  
+  gameSessions[userId].push(session);
+  
+  // Update user progress
+  if (progressData[userId]) {
+    if (!progressData[userId].gamifiedLearning) {
+      progressData[userId].gamifiedLearning = { gamesPlayed: 0, totalXP: 0, level: 1, badges: 0 };
+    }
+    progressData[userId].gamifiedLearning.gamesPlayed++;
+    progressData[userId].gamifiedLearning.totalXP += xpEarned;
+    progressData[userId].gamifiedLearning.level = Math.floor(progressData[userId].gamifiedLearning.totalXP / 100) + 1;
+  }
+  
+  res.json({ success: true, session });
+});
+
+// Achievement APIs
+app.get('/api/achievements/:userId', (req, res) => {
+  const { userId } = req.params;
+  const userAchievements = achievements[userId] || [];
+  res.json(userAchievements);
+});
+
+app.post('/api/achievements/:userId', (req, res) => {
+  const { userId } = req.params;
+  const achievement = req.body;
+  
+  if (!achievements[userId]) {
+    achievements[userId] = [];
+  }
+  
+  achievements[userId].push({
+    ...achievement,
+    unlockedAt: new Date().toISOString()
+  });
+  
+  res.json({ success: true });
+});
+
+// Admin APIs
+app.get('/api/admin/users', (req, res) => {
+  const usersWithProgress = users.map(user => ({
+    ...user,
+    progress: progressData[user.id] || {},
+    recentActivities: (learningActivities[user.id] || []).slice(-5)
+  }));
+  
+  res.json(usersWithProgress);
+});
+
+app.get('/api/admin/stats', (req, res) => {
+  const stats = {
+    totalUsers: users.length,
+    activeToday: users.filter(u => {
+      const lastActive = new Date(u.lastActive);
+      const today = new Date();
+      return lastActive.toDateString() === today.toDateString();
+    }).length,
+    totalSessions: Object.values(gameSessions).flat().length,
+    totalActivities: Object.values(learningActivities).flat().length
+  };
+  
+  res.json(stats);
 });
 
 app.get('/api/sentence', (req, res) => {

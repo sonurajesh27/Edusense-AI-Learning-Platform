@@ -1,0 +1,1078 @@
+import React, { useState, useEffect, useRef } from 'react';
+import Webcam from 'react-webcam';
+import * as tf from '@tensorflow/tfjs';
+import * as handpose from '@tensorflow-models/handpose';
+import { allGestures } from '../utils/aslGestures';
+
+const Sign2Talk = ({ user }) => {
+  const [messages, setMessages] = useState([
+    {
+      id: 1,
+      sender: 'bot',
+      text: 'Welcome to Sign2Talk! 👋 I\'m your AI assistant. Communicate with me using sign language or the virtual keyboard below!',
+      timestamp: new Date(),
+      animation: '🤖'
+    }
+  ]);
+  const [currentSign, setCurrentSign] = useState('');
+  const [currentMessage, setCurrentMessage] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [isModelLoading, setIsModelLoading] = useState(true);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [detectionConfidence, setDetectionConfidence] = useState(0);
+  const [lastDetectedSign, setLastDetectedSign] = useState('');
+  const [detectionCount, setDetectionCount] = useState(0);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+  const [showVirtualKeyboard, setShowVirtualKeyboard] = useState(true);
+  
+  const webcamRef = useRef(null);
+  const canvasRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const detectionIntervalRef = useRef(null);
+  const modelRef = useRef(null);
+  const lastMessageTimeRef = useRef(0);
+  const signStabilityRef = useRef({ sign: '', count: 0 });
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Load hand detection model
+  useEffect(() => {
+    const loadModel = async () => {
+      setIsModelLoading(true);
+      try {
+        await tf.ready();
+        const model = await handpose.load();
+        modelRef.current = model;
+        setIsModelLoading(false);
+        console.log('✅ Handpose model loaded');
+      } catch (error) {
+        console.error('Error loading model:', error);
+        setIsModelLoading(false);
+      }
+    };
+    loadModel();
+
+    return () => {
+      if (detectionIntervalRef.current) {
+        clearInterval(detectionIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Start detection when camera is ready
+  useEffect(() => {
+    if (isCameraReady && !isModelLoading && isDetecting) {
+      startDetection();
+    } else {
+      stopDetection();
+    }
+
+    return () => stopDetection();
+  }, [isCameraReady, isModelLoading, isDetecting]);
+
+  const startDetection = () => {
+    if (detectionIntervalRef.current) return;
+    
+    detectionIntervalRef.current = setInterval(() => {
+      detectHand();
+    }, 200); // Detect every 200ms for real-time responsiveness
+  };
+
+  const stopDetection = () => {
+    if (detectionIntervalRef.current) {
+      clearInterval(detectionIntervalRef.current);
+      detectionIntervalRef.current = null;
+    }
+  };
+
+  const detectHand = async () => {
+    if (
+      !webcamRef.current ||
+      !webcamRef.current.video ||
+      webcamRef.current.video.readyState !== 4 ||
+      !modelRef.current
+    ) {
+      return;
+    }
+
+    const video = webcamRef.current.video;
+    const predictions = await modelRef.current.estimateHands(video);
+
+    if (predictions.length > 0) {
+      const hand = predictions[0];
+      const gesture = await recognizeGesture(hand.landmarks);
+      
+      if (gesture) {
+        handleGestureDetected(gesture.name, gesture.score);
+      } else {
+        setCurrentSign('');
+        setDetectionConfidence(0);
+      }
+    } else {
+      setCurrentSign('');
+      setDetectionConfidence(0);
+    }
+  };
+
+  const recognizeGesture = async (landmarks) => {
+    const GE = new window.fp.GestureEstimator(allGestures);
+    const gesture = await GE.estimate(landmarks, 7.5);
+    
+    if (gesture.gestures.length > 0) {
+      const bestGesture = gesture.gestures.reduce((prev, current) =>
+        prev.score > current.score ? prev : current
+      );
+      
+      if (bestGesture.score > 7) {
+        return bestGesture;
+      }
+    }
+    return null;
+  };
+
+  const handleGestureDetected = (sign, confidence) => {
+    setCurrentSign(sign);
+    setDetectionConfidence(confidence);
+    
+    // Stability check: require 3 consecutive detections of the same sign
+    if (signStabilityRef.current.sign === sign) {
+      signStabilityRef.current.count++;
+    } else {
+      signStabilityRef.current = { sign, count: 1 };
+    }
+
+    // Only send message if sign is stable and enough time has passed
+    const now = Date.now();
+    if (
+      signStabilityRef.current.count >= 3 &&
+      sign !== lastDetectedSign &&
+      now - lastMessageTimeRef.current > 3000 // 3 second cooldown
+    ) {
+      addSignMessage(sign);
+      setLastDetectedSign(sign);
+      lastMessageTimeRef.current = now;
+      setDetectionCount(prev => prev + 1);
+      signStabilityRef.current = { sign: '', count: 0 };
+    }
+  };
+
+  const signAnimations = {
+    'a': '✊', 'b': '✋', 'c': '🤌', 'd': '☝️', 'e': '✊',
+    'f': '�', 'g': '👈', 'h': '✌️', 'i': '🤙', 'j': '🤙',
+    'k': '✌️', 'l': '🤘', 'm': '✊', 'n': '✊', 'o': '�',
+    'p': '☝️', 'q': '👇', 'r': '✌️', 's': '✊', 't': '👊',
+    'u': '✌️', 'v': '✌️', 'w': '🤟', 'x': '☝️', 'y': '🤙',
+    'z': '�',
+    'hello': '👋', 'thanks': '🙏', 'yes': '👍', 'no': '�',
+    'please': '🤲', 'help': '🆘', 'love': '❤️'
+  };
+
+  const botResponses = {
+    'hello': ['Hi there! How can I help you today?', 'Hello! Nice to see you signing!', 'Hey! 👋 Great to chat with you!'],
+    'thanks': ['You\'re welcome! 😊', 'Happy to help!', 'Anytime! Keep practicing!'],
+    'help': ['I\'m here to assist you. What do you need?', 'How can I help you learn?', 'Need help with sign language?'],
+    'yes': ['Great! Let\'s continue!', 'Awesome! 👍', 'Perfect!'],
+    'no': ['No problem!', 'Okay, understood!', 'Alright!'],
+    'please': ['Of course! 😊', 'Sure thing!', 'Absolutely!'],
+    'love': ['Sending love back! ❤️', 'Love you too! 💕', 'That\'s sweet! 💖'],
+    'default': ['I see you signed "{sign}"! Great job! 🎉', 'Nice! You signed "{sign}"!', 'Perfect {sign} sign! Keep going!']
+  };
+
+  // Video Call Functions
+  const setupPeerConnection = async (targetUserId, isInitiator) => {
+    const configuration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' }
+      ]
+    };
+
+    const peerConnection = new RTCPeerConnection(configuration);
+    peerConnectionRef.current = peerConnection;
+
+    // Get local stream
+    if (!localStreamRef.current) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true, 
+          audio: true 
+        });
+        localStreamRef.current = stream;
+        
+        // Add tracks to peer connection
+        stream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, stream);
+        });
+      } catch (error) {
+        console.error('Error accessing media devices:', error);
+        alert('Could not access camera/microphone');
+        return;
+      }
+    }
+
+    // Handle remote stream
+    peerConnection.ontrack = (event) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      }
+    };
+
+    // Handle ICE candidates
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate && socketRef.current) {
+        socketRef.current.emit('webrtc-ice-candidate', {
+          to: targetUserId,
+          candidate: event.candidate
+        });
+      }
+    };
+
+    // If initiator, create and send offer
+    if (isInitiator) {
+      try {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        
+        socketRef.current.emit('webrtc-offer', {
+          to: targetUserId,
+          offer: offer
+        });
+      } catch (error) {
+        console.error('Error creating offer:', error);
+      }
+    }
+  };
+
+  const handleReceiveOffer = async (data) => {
+    await setupPeerConnection(data.from, false);
+    
+    try {
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.offer));
+      const answer = await peerConnectionRef.current.createAnswer();
+      await peerConnectionRef.current.setLocalDescription(answer);
+      
+      socketRef.current.emit('webrtc-answer', {
+        to: data.from,
+        answer: answer
+      });
+    } catch (error) {
+      console.error('Error handling offer:', error);
+    }
+  };
+
+  const handleReceiveAnswer = async (data) => {
+    try {
+      await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+    } catch (error) {
+      console.error('Error handling answer:', error);
+    }
+  };
+
+  const handleNewICECandidate = async (data) => {
+    try {
+      await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+    } catch (error) {
+      console.error('Error adding ICE candidate:', error);
+    }
+  };
+
+  const callUser = (targetUser) => {
+    setSelectedUser(targetUser);
+    socketRef.current.emit('call-user', {
+      to: targetUser.userId,
+      from: {
+        userId: user.id,
+        userName: user.name,
+        userAvatar: user.avatar || `https://ui-avatars.com/api/?name=${user.name}`
+      }
+    });
+  };
+
+  const acceptCall = () => {
+    socketRef.current.emit('accept-call', {
+      to: incomingCall.from.userId,
+      from: {
+        userId: user.id,
+        userName: user.name,
+        userAvatar: user.avatar || `https://ui-avatars.com/api/?name=${user.name}`
+      }
+    });
+    setSelectedUser(incomingCall.from);
+    setIsInCall(true);
+    setIncomingCall(null);
+  };
+
+  const rejectCall = () => {
+    socketRef.current.emit('reject-call', {
+      to: incomingCall.from.userId
+    });
+    setIncomingCall(null);
+  };
+
+  const endCall = () => {
+    if (socketRef.current && selectedUser) {
+      socketRef.current.emit('end-call', {
+        to: selectedUser.userId
+      });
+    }
+
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+
+    setIsInCall(false);
+    setSelectedUser(null);
+  };
+
+  const sendMessage = (text) => {
+    if (!socketRef.current || !selectedUser) return;
+
+    const message = {
+      from: {
+        userId: user.id,
+        userName: user.name
+      },
+      to: selectedUser.userId,
+      text: text,
+      timestamp: new Date()
+    };
+
+    socketRef.current.emit('send-message', message);
+    
+    setMessages(prev => [...prev, {
+      ...message,
+      id: Date.now(),
+      sender: 'user'
+    }]);
+  };
+
+  const addSignMessage = (sign) => {
+    // Add user message
+    const userMessage = {
+      id: Date.now(),
+      sender: 'user',
+      text: sign.toUpperCase(),
+      timestamp: new Date(),
+      animation: signAnimations[sign.toLowerCase()] || '🤟'
+    };
+    
+    setMessages(prev => [...prev, userMessage]);
+    setIsTyping(true);
+
+    // Bot response
+    setTimeout(() => {
+      const responses = botResponses[sign.toLowerCase()] || botResponses.default;
+      let response = responses[Math.floor(Math.random() * responses.length)];
+      response = response.replace('{sign}', sign.toUpperCase());
+      
+      const botMessage = {
+        id: Date.now() + 1,
+        sender: 'bot',
+        text: response,
+        timestamp: new Date(),
+        animation: '🤖'
+      };
+      
+      setMessages(prev => [...prev, botMessage]);
+      setIsTyping(false);
+    }, 1000);
+  };
+
+  const handleQuickSign = (sign) => {
+    addSignMessage(sign);
+    setLastDetectedSign(sign);
+    lastMessageTimeRef.current = Date.now();
+    setDetectionCount(prev => prev + 1);
+  };
+
+  const toggleDetection = () => {
+    setIsDetecting(!isDetecting);
+  };
+
+  const clearChat = () => {
+    setMessages([
+      {
+        id: 1,
+        sender: 'bot',
+        text: 'Chat cleared! Start signing again! 👋',
+        timestamp: new Date(),
+        animation: 'wave'
+      }
+    ]);
+    setDetectionCount(0);
+  };
+
+  const quickSigns = ['Hello', 'Thanks', 'Help', 'Yes', 'No', 'Please'];
+
+  return (
+    <div className="h-[calc(100vh-140px)] flex flex-col">
+      {/* Compact Header */}
+      <div className="bg-gradient-to-r from-blue-600/20 to-purple-600/20 backdrop-blur-xl rounded-t-xl p-3 sm:p-4 border border-white/20 flex-shrink-0">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="bg-gradient-to-br from-blue-500 to-purple-600 p-2 rounded-lg shadow-lg">
+              <span className="text-xl sm:text-2xl">💬</span>
+            </div>
+            <div>
+              <h1 className="text-lg sm:text-xl font-bold text-white">Sign2Talk</h1>
+              <p className="text-white/60 text-xs">{onlineUsers.length} users online</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {isInCall && selectedUser ? (
+              <>
+                <div className="hidden sm:flex items-center gap-2 bg-green-500/20 px-3 py-1.5 rounded-full border border-green-500/30">
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                  <span className="text-green-300 text-xs font-medium">In Call with {selectedUser.userName}</span>
+                </div>
+                <button
+                  onClick={endCall}
+                  className="bg-red-500 hover:bg-red-600 text-white px-3 sm:px-4 py-2 rounded-lg font-medium transition-all hover:scale-105 flex items-center gap-2"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z" />
+                  </svg>
+                  <span className="hidden sm:inline">End Call</span>
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => setShowUserList(!showUserList)}
+                className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white px-3 sm:px-4 py-2 rounded-lg font-medium transition-all hover:scale-105 flex items-center gap-2 shadow-lg"
+              >
+                <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                <span className="hidden sm:inline">Find Users</span>
+                <span className="sm:hidden">Users</span>
+                <span className="bg-white/20 px-2 py-0.5 rounded-full text-xs">{onlineUsers.length}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Incoming Call Modal - Modern animated design */}
+      {incomingCall && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-gradient-to-br from-blue-600/90 to-purple-700/90 backdrop-blur-xl rounded-3xl p-8 max-w-md w-full border-2 border-white/30 shadow-2xl animate-scale-in">
+            <div className="text-center">
+              {/* Animated Avatar */}
+              <div className="relative mx-auto mb-6 w-24 h-24">
+                <div className="absolute inset-0 bg-gradient-to-r from-blue-400 to-purple-500 rounded-full animate-pulse"></div>
+                <div className="absolute inset-2 rounded-full overflow-hidden border-4 border-white">
+                  <img src={incomingCall.from.userAvatar} alt="" className="w-full h-full object-cover" />
+                </div>
+              </div>
+              
+              {/* Caller Info */}
+              <h3 className="text-3xl font-bold text-white mb-2">{incomingCall.from.userName}</h3>
+              <div className="flex items-center justify-center gap-2 mb-6">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                <p className="text-white/90 text-lg">Incoming call...</p>
+              </div>
+              
+              {/* Call Animation */}
+              <div className="flex justify-center gap-1 mb-8">
+                <div className="w-1 h-8 bg-white/60 rounded-full animate-bounce"></div>
+                <div className="w-1 h-12 bg-white/70 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                <div className="w-1 h-10 bg-white/80 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <div className="w-1 h-14 bg-white/90 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></div>
+                <div className="w-1 h-9 bg-white rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+              </div>
+              
+              {/* Action Buttons */}
+              <div className="flex gap-4">
+                <button
+                  onClick={rejectCall}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white px-6 py-4 rounded-2xl font-bold text-lg transition-all hover:scale-105 active:scale-95 flex items-center justify-center gap-2 shadow-xl"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                  Decline
+                </button>
+                <button
+                  onClick={acceptCall}
+                  className="flex-1 bg-green-500 hover:bg-green-600 text-white px-6 py-4 rounded-2xl font-bold text-lg transition-all hover:scale-105 active:scale-95 flex items-center justify-center gap-2 shadow-xl animate-pulse"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                  </svg>
+                  Accept
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* User List Modal - Bottom sheet on mobile, centered on desktop */}
+      {showUserList && !isInCall && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-end sm:items-center justify-center animate-fade-in" onClick={() => setShowUserList(false)}>
+          <div 
+            className="bg-gradient-to-br from-blue-900/95 to-purple-900/95 backdrop-blur-xl w-full sm:max-w-md sm:rounded-3xl rounded-t-3xl p-6 border-t sm:border-2 border-white/30 max-h-[85vh] sm:max-h-[75vh] overflow-y-auto shadow-2xl animate-slide-up sm:animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-white font-bold text-xl">Available Users</h3>
+                <p className="text-white/60 text-sm mt-1">{onlineUsers.length} online now</p>
+              </div>
+              <button
+                onClick={() => setShowUserList(false)}
+                className="text-white/60 hover:text-white hover:bg-white/10 p-2 rounded-xl transition-all"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* User List */}
+            {onlineUsers.length === 0 ? (
+              <div className="text-center py-16">
+                <div className="text-7xl mb-4 animate-bounce">👥</div>
+                <p className="text-white font-semibold text-lg mb-2">No users online</p>
+                <p className="text-white/60 text-sm">Waiting for others to join Sign2Talk...</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {onlineUsers.map((onlineUser, index) => (
+                  <div 
+                    key={onlineUser.userId} 
+                    className="bg-white/10 hover:bg-white/15 backdrop-blur-sm rounded-2xl p-4 flex items-center justify-between transition-all hover:scale-[1.02] border border-white/20 animate-fade-in"
+                    style={{ animationDelay: `${index * 0.1}s` }}
+                  >
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
+                      {/* Avatar with online indicator */}
+                      <div className="relative flex-shrink-0">
+                        <img 
+                          src={onlineUser.userAvatar} 
+                          alt={onlineUser.userName} 
+                          className="w-14 h-14 rounded-full border-3 border-green-400 shadow-lg" 
+                        />
+                        <div className="absolute -bottom-1 -right-1 w-5 h-5 bg-green-400 rounded-full border-2 border-blue-900 animate-pulse"></div>
+                      </div>
+                      
+                      {/* User Info */}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white font-semibold text-base truncate">{onlineUser.userName}</p>
+                        <div className="flex items-center gap-2 mt-1">
+                          <div className="flex items-center gap-1">
+                            <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                            <span className="text-green-300 text-xs font-medium">Active now</span>
+                          </div>
+                          <span className="text-white/40">•</span>
+                          <span className="text-white/60 text-xs">Ready to chat</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Call Button */}
+                    <button
+                      onClick={() => {
+                        callUser(onlineUser);
+                        setShowUserList(false);
+                      }}
+                      className="bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white p-3.5 rounded-xl transition-all hover:scale-110 active:scale-95 flex-shrink-0 shadow-lg group"
+                      title={`Call ${onlineUser.userName}`}
+                    >
+                      <svg className="w-5 h-5 group-hover:animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Footer Tip */}
+            <div className="mt-6 p-4 bg-blue-500/10 border border-blue-500/30 rounded-xl">
+              <div className="flex items-start gap-2 text-blue-200 text-sm">
+                <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <p>Click the call button to start a video chat with sign language detection!</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content - Full Call View */}
+      {isInCall && selectedUser ? (
+        <div className="flex-1 flex flex-col bg-gradient-to-br from-slate-900/50 to-indigo-900/50 backdrop-blur-lg border-x border-white/20 overflow-hidden">
+          {/* Video Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4 flex-1">
+            {/* Your Video */}
+            <div className="relative bg-black rounded-2xl overflow-hidden shadow-2xl border-2 border-blue-500/50 group">
+              <Webcam
+                ref={webcamRef}
+                onUserMedia={() => setIsCameraReady(true)}
+                screenshotFormat="image/jpeg"
+                className="w-full h-full object-cover"
+                mirrored={true}
+                audio={true}
+              />
+              <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full pointer-events-none" />
+              
+              {/* Name Tag */}
+              <div className="absolute bottom-4 left-4 bg-black/70 backdrop-blur-md px-4 py-2 rounded-xl border border-white/20">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                  <p className="text-white font-semibold text-sm">You ({user?.name})</p>
+                </div>
+              </div>
+              
+              {/* Sign Detection Overlay */}
+              {currentSign && (
+                <div className="absolute top-4 left-4 right-4 animate-fade-in">
+                  <div className="bg-gradient-to-r from-green-500 to-emerald-600 backdrop-blur-md rounded-2xl p-4 border-2 border-green-300/50 shadow-xl">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="text-5xl animate-bounce">{signAnimations[currentSign.toLowerCase()] || '🤟'}</div>
+                        <div>
+                          <p className="text-white font-black text-2xl tracking-wide">{currentSign.toUpperCase()}</p>
+                          <p className="text-green-100 text-sm font-medium">Detected!</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-3xl font-black text-white">
+                          {Math.round(detectionConfidence * 10)}%
+                        </div>
+                        <p className="text-green-100 text-xs font-medium">Confidence</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Controls Overlay */}
+              <div className="absolute top-4 right-4 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button className="bg-black/70 hover:bg-black/90 backdrop-blur-md text-white p-3 rounded-xl transition-all">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Remote User Video */}
+            <div className="relative bg-black rounded-2xl overflow-hidden shadow-2xl border-2 border-purple-500/50">
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="w-full h-full object-cover"
+              />
+              
+              {/* Name Tag */}
+              <div className="absolute bottom-4 left-4 bg-black/70 backdrop-blur-md px-4 py-2 rounded-xl border border-white/20">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-purple-400 rounded-full animate-pulse"></div>
+                  <p className="text-white font-semibold text-sm">{selectedUser.userName}</p>
+                </div>
+              </div>
+              
+              {/* Connection Status */}
+              <div className="absolute top-4 right-4 bg-green-500/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-green-300/50">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                  <span className="text-white text-xs font-semibold">Connected</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* In-Call Chat */}
+          <div className="bg-gradient-to-r from-slate-900/80 to-indigo-900/80 backdrop-blur-xl border-t border-white/20 p-4">
+            <div className="max-w-4xl mx-auto">
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const input = e.target.elements.message;
+                if (input.value.trim()) {
+                  sendMessage(input.value.trim());
+                  input.value = '';
+                }
+              }} className="flex items-center gap-3">
+                <input
+                  type="text"
+                  name="message"
+                  placeholder="Send a message..."
+                  className="flex-1 bg-white/10 border-2 border-white/20 focus:border-blue-400 rounded-2xl px-6 py-3 text-white placeholder-white/50 outline-none transition-all"
+                  autoComplete="off"
+                />
+                <button
+                  type="submit"
+                  className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white px-6 py-3 rounded-2xl font-semibold transition-all hover:scale-105 active:scale-95 shadow-lg"
+                >
+                  Send
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* Solo Mode - Sign Detection Practice */
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-6 p-6 bg-gradient-to-br from-slate-900/30 to-indigo-900/30 backdrop-blur-lg border-x border-white/20 overflow-y-auto">
+          {/* Left: Camera & Controls */}
+          <div className="space-y-4">
+            {/* Camera View Card */}
+            <div className="relative bg-black rounded-2xl overflow-hidden border-2 border-white/20 shadow-2xl">
+              {isModelLoading ? (
+                <div className="aspect-video flex items-center justify-center bg-gradient-to-br from-blue-900/30 to-purple-900/30">
+                  <div className="text-center">
+                    <div className="relative w-20 h-20 mx-auto mb-6">
+                      <div className="absolute inset-0 border-4 border-blue-500/30 rounded-full"></div>
+                      <div className="absolute inset-0 border-4 border-t-blue-500 rounded-full animate-spin"></div>
+                    </div>
+                    <p className="text-white font-semibold text-lg mb-2">Loading AI Model...</p>
+                    <p className="text-white/60 text-sm">Initializing hand detection</p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <Webcam
+                    ref={webcamRef}
+                    onUserMedia={() => setIsCameraReady(true)}
+                    screenshotFormat="image/jpeg"
+                    className="w-full"
+                    mirrored={true}
+                  />
+                  <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full" />
+                  
+                  {/* Detection Overlay */}
+                  {currentSign && (
+                    <div className="absolute top-4 left-4 right-4">
+                      <div className="bg-black/80 backdrop-blur-md rounded-xl p-4 border-2 border-green-400">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="text-4xl">{signAnimations[currentSign.toLowerCase()] || '🤟'}</div>
+                            <div>
+                              <p className="text-white font-bold text-lg">{currentSign.toUpperCase()}</p>
+                              <p className="text-green-400 text-sm">Detected!</p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-2xl font-bold text-green-400">
+                              {Math.round(detectionConfidence * 10)}%
+                            </div>
+                            <p className="text-white/70 text-xs">Confidence</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Status Badge */}
+                  <div className="absolute bottom-4 right-4">
+                    <div className={`px-4 py-2 rounded-full backdrop-blur-md font-semibold text-sm ${
+                      isDetecting 
+                        ? 'bg-green-500/80 text-white' 
+                        : 'bg-yellow-500/80 text-black'
+                    }`}>
+                      {isDetecting ? '🎥 Live Detection' : '⏸️ Paused'}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Controls */}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={toggleDetection}
+                disabled={isModelLoading || !isCameraReady}
+                className={`py-3 px-4 rounded-xl font-semibold transition-all duration-200 ${
+                  isDetecting
+                    ? 'bg-yellow-500 hover:bg-yellow-600 text-black'
+                    : 'bg-green-500 hover:bg-green-600 text-white'
+                } disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2`}
+              >
+                {isDetecting ? (
+                  <>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Pause
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Start
+                  </>
+                )}
+              </button>
+              
+              <button
+                onClick={clearChat}
+                className="bg-red-500 hover:bg-red-600 text-white py-3 px-4 rounded-xl font-semibold transition-all duration-200 flex items-center justify-center gap-2"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                Clear Chat
+              </button>
+            </div>
+
+            {/* Quick Signs */}
+            <div className="bg-white/10 rounded-xl p-4 border border-white/20">
+              <p className="text-white text-sm mb-3 font-medium">Quick Signs:</p>
+              <div className="grid grid-cols-3 gap-2">
+                {quickSigns.map((sign) => (
+                  <button
+                    key={sign}
+                    onClick={() => handleQuickSign(sign)}
+                    className="bg-white/10 hover:bg-white/20 border border-white/20 rounded-lg p-2 text-white text-xs font-medium transition-all duration-200 hover:scale-105 active:scale-95"
+                  >
+                    <div className="text-2xl mb-1">{signAnimations[sign.toLowerCase()] || '🤟'}</div>
+                    {sign}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Right: Chat & Stats */}
+          <div className="space-y-4">
+            {/* Chat Window */}
+            <div className="bg-gradient-to-br from-indigo-900/40 to-purple-900/40 backdrop-blur-xl rounded-2xl border-2 border-white/20 flex flex-col h-[500px] overflow-hidden shadow-2xl">
+              {/* Chat Header */}
+              <div className="bg-white/10 backdrop-blur-md px-4 py-3 border-b border-white/20">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center">
+                      {isInCall && selectedUser ? (
+                        <img src={selectedUser.userAvatar} alt="" className="w-full h-full rounded-full" />
+                      ) : (
+                        <span className="text-white text-lg">🤖</span>
+                      )}
+                    </div>
+                    <div>
+                      <h3 className="text-white font-semibold text-sm">
+                        {isInCall && selectedUser ? selectedUser.userName : 'Sign2Talk Bot'}
+                      </h3>
+                      <div className="flex items-center gap-1">
+                        <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                        <span className="text-green-300 text-xs">Online</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-white/60 text-xs">
+                    {messages.length} messages
+                  </div>
+                </div>
+              </div>
+
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent">
+                {messages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in`}
+                  >
+                    {message.sender !== 'user' && (
+                      <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center mr-2 flex-shrink-0">
+                        <span className="text-lg">{message.animation || '🤖'}</span>
+                      </div>
+                    )}
+                    <div
+                      className={`max-w-[75%] rounded-2xl p-3 shadow-lg ${
+                        message.sender === 'user'
+                          ? 'bg-gradient-to-br from-blue-500 to-blue-600 text-white'
+                          : message.sender === 'system'
+                          ? 'bg-gradient-to-br from-purple-500/30 to-pink-500/30 text-white border border-white/20'
+                          : 'bg-white/10 backdrop-blur-md text-white border border-white/20'
+                      }`}
+                    >
+                      {message.sender === 'user' && message.animation && (
+                        <div className="text-3xl mb-2 text-center">{message.animation}</div>
+                      )}
+                      <p className="text-sm leading-relaxed">{message.text}</p>
+                      <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/10">
+                        <span className="text-xs opacity-60">
+                          {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                        {message.sender === 'user' && (
+                          <svg className="w-4 h-4 text-white/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </div>
+                    </div>
+                    {message.sender === 'user' && (
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center ml-2 flex-shrink-0">
+                        <span className="text-white text-xs font-bold">
+                          {user?.name?.charAt(0).toUpperCase() || 'U'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                
+                {isTyping && (
+                  <div className="flex justify-start animate-fade-in">
+                    <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center mr-2">
+                      <span className="text-lg">🤖</span>
+                    </div>
+                    <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3 border border-white/20">
+                      <div className="flex items-center gap-2">
+                        <div className="flex gap-1">
+                          <div className="w-2 h-2 bg-white rounded-full animate-bounce"></div>
+                          <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
+                          <div className="w-2 h-2 bg-white rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                        </div>
+                        <span className="text-white/70 text-sm">Typing...</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Chat Input */}
+              <div className="bg-white/5 backdrop-blur-md px-4 py-3 border-t border-white/20">
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  const input = e.target.elements.message;
+                  if (input.value.trim()) {
+                    if (isInCall && selectedUser) {
+                      sendMessage(input.value.trim());
+                    } else {
+                      addSignMessage(input.value.trim());
+                    }
+                    input.value = '';
+                  }
+                }} className="flex items-center gap-2">
+                  <div className="flex-1 relative">
+                    <input
+                      type="text"
+                      name="message"
+                      placeholder={isInCall ? "Type a message..." : "Type or use sign language..."}
+                      className="w-full bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-white placeholder-white/40 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-400/20 transition-all"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="button"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-2 hover:bg-white/10 rounded-lg transition-colors"
+                      title="Emoji"
+                    >
+                      <span className="text-xl">😊</span>
+                    </button>
+                  </div>
+                  <button
+                    type="submit"
+                    className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white p-3 rounded-xl transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg"
+                  >
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                    </svg>
+                  </button>
+                </form>
+                <div className="flex items-center gap-2 mt-2 text-white/40 text-xs">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <span>Press Enter to send • Use signs or type messages</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Stats Cards */}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-gradient-to-br from-blue-500/20 to-blue-600/20 backdrop-blur-xl rounded-2xl p-4 border-2 border-blue-400/30 text-center shadow-lg">
+                <div className="text-3xl font-black text-blue-400 mb-1">{detectionCount}</div>
+                <p className="text-white/80 text-xs font-medium">Signs Detected</p>
+              </div>
+              <div className="bg-gradient-to-br from-purple-500/20 to-purple-600/20 backdrop-blur-xl rounded-2xl p-4 border-2 border-purple-400/30 text-center shadow-lg">
+                <div className="text-3xl font-black text-purple-400 mb-1">{messages.length}</div>
+                <p className="text-white/80 text-xs font-medium">Messages</p>
+              </div>
+              <div className="bg-gradient-to-br from-green-500/20 to-green-600/20 backdrop-blur-xl rounded-2xl p-4 border-2 border-green-400/30 text-center shadow-lg">
+                <div className="text-3xl font-black text-green-400 mb-1">
+                  {currentSign ? Math.round(detectionConfidence * 10) + '%' : '--'}
+                </div>
+                <p className="text-white/80 text-xs font-medium">Confidence</p>
+              </div>
+            </div>
+
+            {/* Quick Guide */}
+            <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 backdrop-blur-xl border-2 border-blue-400/30 rounded-2xl p-5 shadow-lg">
+              <div className="flex items-start gap-3">
+                <div className="bg-blue-500/20 p-2 rounded-xl flex-shrink-0">
+                  <svg className="w-6 h-6 text-blue-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div className="text-blue-100">
+                  <p className="font-bold mb-2 text-white">💡 How to use Sign2Talk</p>
+                  <ul className="space-y-1.5 text-sm text-blue-200/90">
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 font-bold">•</span>
+                      <span>Click <strong>"Find Users"</strong> to see who's online</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 font-bold">•</span>
+                      <span>Call someone to start video chat with sign detection</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 font-bold">•</span>
+                      <span>Or practice solo: Start detection and show ASL signs (A-Z)</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="text-blue-400 font-bold">•</span>
+                      <span>Hold each sign steady for 3 seconds to auto-send</span>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bottom Stats Bar - Always Visible */}
+      <div className="bg-gradient-to-r from-slate-900/90 to-indigo-900/90 backdrop-blur-xl rounded-b-xl p-4 border-x border-b-2 border-white/20 flex-shrink-0">
+        <div className="flex items-center justify-center gap-6 text-white/60 text-sm">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></div>
+            <span>AI Powered Detection</span>
+          </div>
+          <div className="hidden sm:block">•</div>
+          <div className="hidden sm:flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Real-time Translation</span>
+          </div>
+          <div className="hidden sm:block">•</div>
+          <div className="hidden sm:flex items-center gap-2">
+            <span className="text-lg">🤟</span>
+            <span>ASL A-Z Supported</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Sign2Talk;

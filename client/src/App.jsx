@@ -5,13 +5,23 @@ import ControlPanel from './components/ControlPanel';
 import Header from './components/Header';
 import TouchRead from './components/TouchRead';
 import MobileCameraPage from './components/MobileCameraPage';
+import Login from './components/Login';
+import Signup from './components/Signup';
+import Sign2Talk from './components/Sign2Talk';
+import GamifiedLearning from './components/GamifiedLearning';
+import AdminDashboard from './components/AdminDashboard';
+import TextToSign from './components/TextToSign';
+import ProgressAnalytics from './components/ProgressAnalytics';
+import Layout from './components/Layout';
 
 function App() {
   const [isDetecting, setIsDetecting] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(true);
   const [recognizedText, setRecognizedText] = useState('');
-  const [mode, setMode] = useState('signLanguage'); // 'signLanguage' or 'touchRead'
+  const [mode, setMode] = useState('signLanguage'); // Multiple modes now
   const [isMobileCameraPage, setIsMobileCameraPage] = useState(false);
+  const [user, setUser] = useState(null);
+  const [authMode, setAuthMode] = useState('login'); // 'login' or 'signup'
 
   // Check if this is the mobile camera page
   useEffect(() => {
@@ -19,7 +29,27 @@ function App() {
     if (params.get('id') && window.location.pathname.includes('mobile-camera')) {
       setIsMobileCameraPage(true);
     }
+    
+    // Check for existing user session
+    const savedUser = localStorage.getItem('user');
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
+    }
   }, []);
+
+  const handleLogin = (userData) => {
+    setUser(userData);
+  };
+
+  const handleSignup = (userData) => {
+    setUser(userData);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('user');
+    setUser(null);
+    setMode('signLanguage');
+  };
 
   const handleTextUpdate = (text) => {
     setRecognizedText(text);
@@ -41,45 +71,68 @@ function App() {
     return <MobileCameraPage />;
   }
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-900 via-purple-900 to-indigo-900">
-      <div className="container mx-auto px-4 py-6">
-        <Header />
-        
-        {/* Mode Switcher */}
-        <div className="flex justify-center gap-4 mt-6 mb-6">
-          <button
-            onClick={() => setMode('signLanguage')}
-            className={`px-8 py-4 rounded-xl font-semibold text-lg transition-all duration-300 transform hover:scale-105 shadow-lg ${
-              mode === 'signLanguage'
-                ? 'bg-blue-500 text-white'
-                : 'bg-white/10 text-white/70 hover:bg-white/20'
-            }`}
-          >
-            <svg className="w-6 h-6 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
-            </svg>
-            Sign Language
-          </button>
-          <button
-            onClick={() => setMode('touchRead')}
-            className={`px-8 py-4 rounded-xl font-semibold text-lg transition-all duration-300 transform hover:scale-105 shadow-lg ${
-              mode === 'touchRead'
-                ? 'bg-purple-500 text-white'
-                : 'bg-white/10 text-white/70 hover:bg-white/20'
-            }`}
-          >
-            <svg className="w-6 h-6 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-            </svg>
-            TouchRead
-          </button>
-        </div>
+  // Show auth screens if user is not logged in
+  if (!user) {
+    if (authMode === 'login') {
+      return <Login onLogin={handleLogin} onSwitchToSignup={() => setAuthMode('signup')} />;
+    } else {
+      return <Signup onSignup={handleSignup} onSwitchToLogin={() => setAuthMode('login')} />;
+    }
+  }
 
-        {mode === 'signLanguage' ? (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+  // Main application with layout
+  const renderContent = () => {
+    switch (mode) {
+      case 'sign2talk':
+        return <Sign2Talk user={user} />;
+      
+      case 'gamified':
+        return <GamifiedLearning user={user} />;
+      
+      case 'dashboard':
+        return <AdminDashboard user={user} />;
+      
+      case 'textToSign':
+        return <TextToSign user={user} />;
+      
+      case 'analytics':
+        return <ProgressAnalytics userId={user.id} user={user} />;
+      
+      case 'touchRead':
+        return <TouchRead user={user} />;
+      
+      case 'signLanguage':
+      default:
+        return (
+          <div className="space-y-4 sm:space-y-6">
+            {/* Page Header */}
+            <div className="bg-gradient-to-r from-blue-600/20 to-purple-600/20 backdrop-blur-xl rounded-xl sm:rounded-2xl p-4 sm:p-6 border border-white/20 shadow-xl">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="bg-gradient-to-br from-blue-500 to-purple-600 p-3 rounded-xl shadow-lg">
+                    <span className="text-3xl sm:text-4xl">🤟</span>
+                  </div>
+                  <div>
+                    <h2 className="text-xl sm:text-3xl font-bold text-white mb-1">
+                      Sign Language to Text
+                    </h2>
+                    <p className="text-white/70 text-xs sm:text-sm">AI-powered real-time detection and translation</p>
+                  </div>
+                </div>
+                <div className="bg-green-500/20 px-3 sm:px-4 py-2 rounded-full border border-green-500/30 w-fit">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                    <span className="text-green-300 text-xs sm:text-sm font-medium">AI Ready</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Main Content Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+
             {/* Main Camera View */}
-            <div className="lg:col-span-2 space-y-6">
+            <div className="lg:col-span-2 space-y-4 sm:space-y-6">
               {isCameraOn && (
                 <CameraView 
                   isDetecting={isDetecting}
@@ -87,10 +140,10 @@ function App() {
                 />
               )}
               {!isCameraOn && (
-                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-12 border border-white/20 shadow-2xl text-center">
-                  <div className="text-6xl mb-4">📷</div>
-                  <h3 className="text-2xl font-bold text-white mb-2">Camera is Off</h3>
-                  <p className="text-white/70">Click "Turn On Camera" to start</p>
+                <div className="bg-gradient-to-br from-gray-800/50 to-gray-900/50 backdrop-blur-xl rounded-xl sm:rounded-2xl p-8 sm:p-12 border border-white/10 shadow-2xl text-center">
+                  <div className="text-5xl sm:text-6xl mb-4">📷</div>
+                  <h3 className="text-xl sm:text-2xl font-bold text-white mb-2">Camera is Off</h3>
+                  <p className="text-white/60 text-sm sm:text-base">Click "Turn On Camera" to start detecting</p>
                 </div>
               )}
               
@@ -98,7 +151,7 @@ function App() {
             </div>
 
             {/* Control Panel */}
-            <div className="lg:col-span-1 space-y-6">
+            <div className="lg:col-span-1 space-y-4 sm:space-y-6">
               <ControlPanel 
                 isDetecting={isDetecting}
                 setIsDetecting={setIsDetecting}
@@ -108,39 +161,50 @@ function App() {
               />
               
               {/* Instructions Card */}
-              <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 border border-white/20 shadow-2xl">
-                <h3 className="text-xl font-bold text-white mb-4 flex items-center">
-                  <svg className="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  How to Use
+              <div className="bg-gradient-to-br from-indigo-600/20 to-purple-600/20 backdrop-blur-xl rounded-xl sm:rounded-2xl p-4 sm:p-6 border border-white/20 shadow-xl">
+                <h3 className="text-lg sm:text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  <div className="bg-gradient-to-br from-blue-500 to-purple-600 p-2 rounded-lg">
+                    <svg className="w-4 h-4 sm:w-5 sm:h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  Quick Guide
                 </h3>
-                <ul className="space-y-3 text-white/80">
-                  <li className="flex items-start">
-                    <span className="flex-shrink-0 w-6 h-6 bg-primary-500 rounded-full flex items-center justify-center text-xs font-bold mr-3 mt-0.5">1</span>
+                <ul className="space-y-3 text-white/80 text-sm sm:text-base">
+                  <li className="flex items-start gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
+                    <span className="flex-shrink-0 w-6 h-6 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-xs font-bold text-white">1</span>
                     <span>Allow camera access when prompted</span>
                   </li>
-                  <li className="flex items-start">
-                    <span className="flex-shrink-0 w-6 h-6 bg-primary-500 rounded-full flex items-center justify-center text-xs font-bold mr-3 mt-0.5">2</span>
+                  <li className="flex items-start gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
+                    <span className="flex-shrink-0 w-6 h-6 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-xs font-bold text-white">2</span>
                     <span>Click "Start Detection" to begin</span>
                   </li>
-                  <li className="flex items-start">
-                    <span className="flex-shrink-0 w-6 h-6 bg-primary-500 rounded-full flex items-center justify-center text-xs font-bold mr-3 mt-0.5">3</span>
+                  <li className="flex items-start gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
+                    <span className="flex-shrink-0 w-6 h-6 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-xs font-bold text-white">3</span>
                     <span>Show hand signs to the camera</span>
                   </li>
-                  <li className="flex items-start">
-                    <span className="flex-shrink-0 w-6 h-6 bg-primary-500 rounded-full flex items-center justify-center text-xs font-bold mr-3 mt-0.5">4</span>
+                  <li className="flex items-start gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
+                    <span className="flex-shrink-0 w-6 h-6 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-xs font-bold text-white">4</span>
                     <span>Watch text appear in real-time</span>
                   </li>
                 </ul>
               </div>
             </div>
           </div>
-        ) : (
-          <TouchRead />
-        )}
-      </div>
-    </div>
+        </div>
+      );
+    }
+  };
+
+  return (
+    <Layout 
+      user={user} 
+      onLogout={handleLogout}
+      currentMode={mode}
+      onModeChange={setMode}
+    >
+      {renderContent()}
+    </Layout>
   );
 }
 
