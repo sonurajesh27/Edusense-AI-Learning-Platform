@@ -5,8 +5,11 @@ const http = require('http');
 const socketIo = require('socket.io');
 const os = require('os');
 const { exec } = require('child_process');
-const tf = require('@tensorflow/tfjs-node');
+// const tf = require('@tensorflow/tfjs-node'); // Commented out - causing native binding issues
 const path = require('path');
+const { dbOperations } = require('./database');
+const { initializeGamingDatabase } = require('./gamingDatabase');
+const gamingRoutes = require('./gamingRoutes');
 require('dotenv').config();
 
 const app = express();
@@ -41,6 +44,9 @@ app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '50mb' }));
 
+// Gaming API routes
+app.use('/api/gaming', gamingRoutes);
+
 // Store recognized signs and sentences
 let currentSentence = '';
 let recognitionHistory = [];
@@ -50,6 +56,10 @@ let mobileConnections = new Map();
 
 // Store Sign2Talk users
 let sign2TalkUsers = new Map();
+
+// In-memory cache for fast access (optional)
+let gestureCache = new Map(); // userId -> recent gestures
+const CACHE_SIZE = 50; // Keep last 50 gestures per user in memory
 
 // Store Cloudflare Tunnel URL
 let cloudflareUrl = null;
@@ -150,15 +160,17 @@ function predictSignFromLandmarks(landmarks) {
   }
 }
 
-// Load ASL Model
+// Load ASL Model (disabled - using fallback only to avoid TensorFlow issues)
 async function loadASLModel() {
   try {
-    const modelPath = path.join(__dirname, '../ASL.h5');
-    console.log('🔧 Loading ASL model from:', modelPath);
-    aslModel = await tf.loadLayersModel('file://' + modelPath);
-    console.log('✅ ASL Model loaded successfully');
-    console.log('   Input shape:', aslModel.inputs[0].shape);
-    console.log('   Output shape:', aslModel.outputs[0].shape);
+    // const modelPath = path.join(__dirname, '../ASL.h5');
+    // console.log('🔧 Loading ASL model from:', modelPath);
+    // aslModel = await tf.loadLayersModel('file://' + modelPath);
+    // console.log('✅ ASL Model loaded successfully');
+    // console.log('   Input shape:', aslModel.inputs[0].shape);
+    // console.log('   Output shape:', aslModel.outputs[0].shape);
+    console.log('⚠️  Using rule-based detection (TensorFlow disabled)');
+    aslModel = 'fallback'; // Mark as using fallback
     return true;
   } catch (error) {
     console.error('❌ Error loading ASL model:', error.message);
@@ -209,8 +221,9 @@ function preprocessLandmarks(landmarks) {
       // Flatten to 63 features
       const flattened = normalized.flat();
 
-      // Convert to tensor with shape [1, 63]
-      return tf.tensor2d([flattened]);
+      // Convert to tensor with shape [1, 63] (disabled - using fallback)
+      // return tf.tensor2d([flattened]);
+      return flattened; // Return plain array instead
     }
 
     // Fallback: simple normalization
@@ -219,7 +232,8 @@ function preprocessLandmarks(landmarks) {
     }
 
     const normalized = landmarksArray.map(val => val / 640.0);
-    return tf.tensor2d([normalized]);
+    // return tf.tensor2d([normalized]);
+    return normalized; // Return plain array instead
   } catch (error) {
     console.error('Error preprocessing landmarks:', error);
     throw error;
@@ -478,6 +492,326 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Sign Language Converter API is running' });
 });
 
+// Gesture Data Collection API Endpoints
+app.post('/api/gestures', async (req, res) => {
+  try {
+    const { sessionId, userId, gestures, userProfile, batchStats } = req.body;
+
+    if (!userId || !gestures) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: userId and gestures' 
+      });
+    }
+
+    // Create or update user profile in database
+    if (userProfile) {
+      try {
+        await dbOperations.createUserProfile({
+          userId,
+          handSize: userProfile.handSize,
+          dominantHand: userProfile.dominantHand
+        });
+      } catch (err) {
+        console.warn('Warning: Could not create/update user profile:', err.message);
+      }
+    }
+
+    // Store individual gesture data
+    let storedCount = 0;
+    let accuracyUpdates = 0;
+
+    for (const gesture of gestures) {
+      try {
+        // Store gesture data
+        await dbOperations.storeGestureData({
+          ...gesture,
+          userId,
+          sessionId
+        });
+        storedCount++;
+
+        // Update gesture accuracy if it's a valid detection
+        if (gesture.detectedSign && !gesture.recognitionFailed) {
+          const isSuccessful = gesture.confidence > 0.8;
+          await dbOperations.updateGestureAccuracy(
+            userId, 
+            gesture.detectedSign, 
+            gesture.confidence, 
+            isSuccessful
+          );
+          accuracyUpdates++;
+
+          // Update personalized thresholds based on performance
+          await updatePersonalizedThresholds(userId, gesture.detectedSign, gesture.confidence, isSuccessful);
+        }
+
+        // Update in-memory cache for fast access
+        if (!gestureCache.has(userId)) {
+          gestureCache.set(userId, []);
+        }
+        const userCache = gestureCache.get(userId);
+        userCache.push(gesture);
+        if (userCache.length > CACHE_SIZE) {
+          userCache.shift(); // Remove oldest
+        }
+
+      } catch (err) {
+        console.error(`Error storing gesture ${gesture.id}:`, err.message);
+      }
+    }
+
+    // Store batch information
+    try {
+      await dbOperations.storeBatch({
+        batchId: `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        userId,
+        sessionId,
+        gestureCount: gestures.length,
+        uniqueSigns: [...new Set(gestures.map(g => g.detectedSign).filter(Boolean))].length,
+        averageConfidence: gestures.reduce((sum, g) => sum + (g.confidence || 0), 0) / gestures.length,
+        sessionContext: gestures[0]?.sessionContext || 'unknown',
+        isRetry: req.body.isRetry || false
+      });
+    } catch (err) {
+      console.warn('Warning: Could not store batch data:', err.message);
+    }
+
+    // Update user statistics
+    try {
+      const userStats = await calculateUserStats(userId);
+      await dbOperations.updateUserStats(userId, userStats);
+    } catch (err) {
+      console.warn('Warning: Could not update user stats:', err.message);
+    }
+
+    // Log statistics
+    const uniqueSigns = [...new Set(gestures.map(g => g.detectedSign).filter(Boolean))];
+    console.log(`📊 Stored ${storedCount}/${gestures.length} gestures from user ${userId.substr(-6)}`);
+    console.log(`   Signs: [${uniqueSigns.join(', ')}]`);
+    console.log(`   Accuracy updates: ${accuracyUpdates}`);
+
+    res.json({
+      success: true,
+      message: 'Gesture data stored successfully in database',
+      stored: storedCount,
+      accuracyUpdates,
+      uniqueSigns: uniqueSigns.length
+    });
+
+  } catch (error) {
+    console.error('Error storing gesture data:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to store gesture data in database'
+    });
+  }
+});
+
+// Helper function to update personalized thresholds
+async function updatePersonalizedThresholds(userId, gestureSign, confidence, isSuccessful) {
+  try {
+    // Get current accuracy for this gesture
+    const accuracyData = await dbOperations.getGestureAccuracy(userId);
+    const signData = accuracyData.find(row => row.gesture_sign === gestureSign);
+
+    if (signData && signData.attempts >= 5) { // Need minimum attempts for personalization
+      const accuracy = signData.successful / signData.attempts;
+      const avgConfidence = signData.average_confidence;
+
+      let newThreshold = 0.8; // Default threshold
+
+      if (accuracy > 0.9 && avgConfidence > 0.85) {
+        newThreshold = 0.9; // Higher threshold for confident signs
+      } else if (accuracy < 0.5) {
+        newThreshold = 0.7; // Lower threshold for struggling signs
+      }
+
+      await dbOperations.updatePersonalizedThreshold(userId, gestureSign, newThreshold);
+    }
+  } catch (err) {
+    console.warn('Warning: Could not update personalized thresholds:', err.message);
+  }
+}
+
+// Helper function to calculate user statistics
+async function calculateUserStats(userId) {
+  try {
+    const gestureHistory = await dbOperations.getGestureHistory(userId, 1000);
+    const accuracyData = await dbOperations.getGestureAccuracy(userId);
+
+    const totalGestures = gestureHistory.length;
+    const sessionCount = [...new Set(gestureHistory.map(g => g.session_id))].length;
+
+    // Calculate overall accuracy
+    let averageAccuracy = 0;
+    if (accuracyData.length > 0) {
+      const totalAttempts = accuracyData.reduce((sum, row) => sum + row.attempts, 0);
+      const totalSuccessful = accuracyData.reduce((sum, row) => sum + row.successful, 0);
+      averageAccuracy = totalAttempts > 0 ? (totalSuccessful / totalAttempts) : 0;
+    }
+
+    return {
+      totalGestures,
+      averageAccuracy,
+      sessionCount
+    };
+  } catch (err) {
+    console.error('Error calculating user stats:', err);
+    return { totalGestures: 0, averageAccuracy: 0, sessionCount: 0 };
+  }
+}
+
+// Get user's gesture statistics
+app.get('/api/gestures/stats/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Get user profile
+    const userProfile = await dbOperations.getUserProfile(userId);
+    if (!userProfile) {
+      return res.status(404).json({
+        success: false,
+        error: 'User profile not found'
+      });
+    }
+
+    // Get gesture history and accuracy data
+    const [gestureHistory, accuracyData] = await Promise.all([
+      dbOperations.getGestureHistory(userId, 50),
+      dbOperations.getGestureAccuracy(userId)
+    ]);
+
+    // Calculate top signs
+    const topSigns = accuracyData
+      .sort((a, b) => b.successful - a.successful)
+      .slice(0, 10)
+      .map(row => ({
+        sign: row.gesture_sign,
+        attempts: row.attempts,
+        successful: row.successful,
+        accuracy: row.successful / row.attempts,
+        avgConfidence: row.average_confidence
+      }));
+
+    const stats = {
+      userId: userId,
+      profile: {
+        totalGestures: userProfile.total_gestures,
+        averageAccuracy: userProfile.average_accuracy,
+        sessionCount: userProfile.session_count,
+        handSize: userProfile.hand_size,
+        dominantHand: userProfile.dominant_hand,
+        createdAt: userProfile.created_at,
+        updatedAt: userProfile.updated_at
+      },
+      recentActivity: gestureHistory.map(row => ({
+        id: row.gesture_id,
+        detectedSign: row.detected_sign,
+        confidence: row.confidence,
+        sessionContext: row.session_context,
+        timestamp: row.timestamp,
+        recognitionMethod: row.recognition_method
+      })),
+      topSigns,
+      totalUniqueSigns: accuracyData.length
+    };
+
+    res.json({
+      success: true,
+      stats
+    });
+
+  } catch (error) {
+    console.error('Error retrieving gesture stats:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve gesture statistics from database'
+    });
+  }
+});
+
+// Get personalized gesture thresholds for a user
+app.get('/api/gestures/thresholds/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const [thresholds, accuracyData] = await Promise.all([
+      dbOperations.getPersonalizedThresholds(userId),
+      dbOperations.getGestureAccuracy(userId)
+    ]);
+
+    if (Object.keys(thresholds).length === 0) {
+      return res.json({
+        success: true,
+        thresholds: {}, // Empty thresholds, will use defaults
+        message: 'No personalized data available, using default thresholds'
+      });
+    }
+
+    res.json({
+      success: true,
+      thresholds,
+      totalSigns: accuracyData.length,
+      personalizedSigns: Object.keys(thresholds).length
+    });
+
+  } catch (error) {
+    console.error('Error retrieving personalized thresholds:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve personalized thresholds from database'
+    });
+  }
+});
+
+// Admin endpoint to view all gesture data analytics
+app.get('/api/admin/gesture-analytics', async (req, res) => {
+  try {
+    const analytics = await dbOperations.getAnalytics();
+
+    res.json({
+      success: true,
+      analytics: {
+        ...analytics,
+        databaseInfo: {
+          storage: 'SQLite Database',
+          persistent: true,
+          location: 'server/gesture_learning.db'
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error retrieving gesture analytics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to retrieve gesture analytics from database'
+    });
+  }
+});
+
+// Admin endpoint to cleanup old data
+app.post('/api/admin/cleanup', async (req, res) => {
+  try {
+    const { daysToKeep = 30 } = req.body;
+    const result = await dbOperations.cleanupOldData(daysToKeep);
+
+    res.json({
+      success: true,
+      message: `Cleaned up gesture data older than ${daysToKeep} days`,
+      deletedRecords: result.deletedRecords
+    });
+
+  } catch (error) {
+    console.error('Error cleaning up old data:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to cleanup old data'
+    });
+  }
+});
+
 // Sign2Talk Online Users API - Get all online users with details
 app.get('/api/sign2talk/online-users', (req, res) => {
   const onlineUsers = Array.from(sign2TalkUsers.values());
@@ -502,7 +836,9 @@ app.get('/api/sign2talk/online-count', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
-    model_loaded: aslModel !== null
+    model_loaded: aslModel !== null,
+    detection_method: 'rule_based',
+    tensorflow_disabled: true
   });
 });
 
@@ -518,27 +854,38 @@ app.post('/predict', async (req, res) => {
       return res.status(500).json({ error: 'Model not loaded' });
     }
 
-    // Use fallback detection if model is not properly loaded
-    if (aslModel === 'fallback') {
-      const result = predictSignFromLandmarks(landmarks);
-      return res.json({
-        letter: result.letter,
-        confidence: result.confidence,
-        top_predictions: [
-          { letter: result.letter, confidence: result.confidence }
-        ]
-      });
-    }
+    // Use fallback detection (TensorFlow disabled)
+    const result = predictSignFromLandmarks(landmarks);
+    return res.json({
+      letter: result.letter,
+      confidence: result.confidence,
+      method: 'rule_based',
+      top_predictions: [
+        { letter: result.letter, confidence: result.confidence }
+      ]
+    });
 
-    // Preprocess landmarks
-    const inputTensor = preprocessLandmarks(landmarks);
+    // TensorFlow prediction disabled to avoid native binding issues
+    // if (aslModel === 'fallback') {
+    //   const result = predictSignFromLandmarks(landmarks);
+    //   return res.json({
+    //     letter: result.letter,
+    //     confidence: result.confidence,
+    //     top_predictions: [
+    //       { letter: result.letter, confidence: result.confidence }
+    //     ]
+    //   });
+    // }
 
-    // Make prediction
-    const predictions = aslModel.predict(inputTensor);
-    const predictionsData = await predictions.data();
+    // // Preprocess landmarks
+    // const inputTensor = preprocessLandmarks(landmarks);
 
-    // Clean up tensors
-    inputTensor.dispose();
+    // // Make prediction
+    // const predictions = aslModel.predict(inputTensor);
+    // const predictionsData = await predictions.data();
+
+    // // Clean up tensors
+    // inputTensor.dispose();
     predictions.dispose();
 
     // Get predicted class
@@ -579,30 +926,45 @@ app.post('/predict/batch', async (req, res) => {
       return res.status(400).json({ error: 'No landmarks list provided' });
     }
 
-    if (!aslModel) {
-      return res.status(500).json({ error: 'Model not loaded' });
-    }
-
+    // Use rule-based detection for all (TensorFlow disabled)
     const results = [];
 
     for (const landmarks of landmarks_list) {
-      const inputTensor = preprocessLandmarks(landmarks);
-      const predictions = aslModel.predict(inputTensor);
-      const predictionsData = await predictions.data();
-
-      inputTensor.dispose();
-      predictions.dispose();
-
-      const predictedClass = predictionsData.indexOf(Math.max(...predictionsData));
-      const confidence = predictionsData[predictedClass];
-
+      const result = predictSignFromLandmarks(landmarks);
       results.push({
-        letter: LETTERS[predictedClass],
-        confidence: confidence
+        letter: result.letter,
+        confidence: result.confidence,
+        method: 'rule_based'
       });
     }
 
-    res.json({ predictions: results });
+    res.json({ 
+      predictions: results,
+      method: 'rule_based_batch',
+      count: results.length
+    });
+
+    // TensorFlow batch processing disabled
+    // if (!aslModel) {
+    //   return res.status(500).json({ error: 'Model not loaded' });
+    // }
+
+    // const results = [];
+
+    // for (const landmarks of landmarks_list) {
+    //   const inputTensor = preprocessLandmarks(landmarks);
+    //   const predictions = aslModel.predict(inputTensor);
+    //   const predictionsData = await predictions.data();
+    //   inputTensor.dispose();
+    //   predictions.dispose();
+    //   const predictedClass = predictionsData.indexOf(Math.max(...predictionsData));
+    //   const confidence = predictionsData[predictedClass];
+    //   results.push({
+    //     letter: LETTERS[predictedClass],
+    //     confidence: confidence
+    //   });
+    // }
+
   } catch (error) {
     console.error('Batch prediction error:', error);
     res.status(500).json({ error: error.message });
@@ -804,6 +1166,10 @@ app.get('/', (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', async () => {
+  // Initialize gaming database
+  console.log(`\n🎮 Initializing gaming database...`);
+  initializeGamingDatabase();
+  
   console.log(`\n🚀 Server running on:`);
   console.log(`   Local:   http://localhost:${PORT}`);
   console.log(`   Network: http://${LOCAL_IP}:${PORT}`);
