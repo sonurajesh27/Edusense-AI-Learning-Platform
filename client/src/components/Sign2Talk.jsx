@@ -3,6 +3,15 @@ import Webcam from 'react-webcam';
 import * as tf from '@tensorflow/tfjs';
 import * as handpose from '@tensorflow-models/handpose';
 import { allGestures } from '../utils/aslGestures';
+import { checkAPIHealth, predictSignAPI, formatLandmarksForAPI } from '../utils/aslModelAPI';
+import {
+  normalizeHandLandmarks,
+  calculatePoseConfidence,
+  isHandStable,
+  preprocessForPrediction,
+  detectHandOrientation,
+  isValidHandPose
+} from '../utils/handSignatureProcessor';
 import CameraView from './CameraView';
 import ControlPanel from './ControlPanel';
 import Stats from './Stats';
@@ -29,7 +38,12 @@ const Sign2Talk = () => {
   const [detectionCount, setDetectionCount] = useState(0);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [showVirtualKeyboard, setShowVirtualKeyboard] = useState(false);
-  
+  const [useEnhancedModel, setUseEnhancedModel] = useState(false);
+  const [handStability, setHandStability] = useState(0);
+  const [isHandStable, setIsHandStable] = useState(false);
+  const [handOrientation, setHandOrientation] = useState(null);
+  const [detectionQuality, setDetectionQuality] = useState('none');
+
   const user = { name: 'User' }; // Placeholder user object
   
   const webcamRef = useRef(null);
@@ -37,8 +51,11 @@ const Sign2Talk = () => {
   const messagesEndRef = useRef(null);
   const detectionIntervalRef = useRef(null);
   const modelRef = useRef(null);
+  const aslModelRef = useRef(null);
   const lastMessageTimeRef = useRef(0);
   const signStabilityRef = useRef({ sign: '', count: 0 });
+  const previousLandmarksRef = useRef(null);
+  const handOrientationRef = useRef(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -53,12 +70,28 @@ const Sign2Talk = () => {
       setIsModelLoading(true);
       try {
         await tf.ready();
-        const model = await handpose.load();
-        modelRef.current = model;
+        console.log('🔧 TensorFlow.js ready');
+        
+        // Load handpose model for hand detection
+        const handposeModel = await handpose.load();
+        modelRef.current = handposeModel;
+        console.log('🤖 Handpose model loaded successfully');
+        
+        // Check if enhanced ASL model API is available
+        const apiAvailable = await checkAPIHealth();
+        setUseEnhancedModel(apiAvailable);
+        
+        if (apiAvailable) {
+          console.log('✅ Enhanced ASL Model API available - Using 99% accuracy model');
+          aslModelRef.current = 'API'; // Marker to use API
+        } else {
+          console.log('ℹ️ Using fallback gesture recognition');
+          aslModelRef.current = null;
+        }
+        
         setIsModelLoading(false);
-        console.log('🤖 Handpose model loaded');
       } catch (error) {
-        console.error('Error loading model:', error);
+        console.error('Error loading models:', error);
         setIsModelLoading(false);
       }
     };
@@ -84,7 +117,7 @@ const Sign2Talk = () => {
     if (detectionIntervalRef.current) return;
     detectionIntervalRef.current = setInterval(() => {
       detectHand();
-    }, 400); // Balanced interval for accurate detection without being too slow
+    }, 800); // Slower detection speed for better stability
   };
 
   const stopDetection = () => {
@@ -103,40 +136,118 @@ const Sign2Talk = () => {
 
     if (predictions.length > 0) {
       const hand = predictions[0];
-      const gesture = await recognizeGesture(hand.landmarks);
-      if (gesture) {
-        handleGestureDetected(gesture.name, gesture.score);
+      const landmarks = hand.landmarks;
+
+      // Validate hand pose
+      if (!isValidHandPose(landmarks)) {
+        setCurrentSign('');
+        setDetectionConfidence(0);
+        setDetectionQuality('invalid');
+        setHandStability(0);
+        setIsHandStable(false);
+        return;
+      }
+
+      setDetectionQuality('valid');
+
+      // Detect hand orientation (left/right hand)
+      const orientation = detectHandOrientation(landmarks);
+      handOrientationRef.current = orientation;
+      setHandOrientation(orientation);
+
+      // Calculate pose stability confidence
+      const stabilityConfidence = calculatePoseConfidence(landmarks, previousLandmarksRef.current);
+      setHandStability(stabilityConfidence);
+
+      // Check if hand is stable enough for recognition
+      const stable = isHandStable(landmarks, previousLandmarksRef.current, 3);
+      setIsHandStable(stable);
+
+      // Store current landmarks for next frame
+      previousLandmarksRef.current = landmarks;
+
+      // Only proceed with recognition if hand is relatively stable
+      if (stable) {
+        setDetectionQuality('stable');
+        const gesture = await recognizeGesture(landmarks, stabilityConfidence);
+        if (gesture) {
+          handleGestureDetected(gesture.name, gesture.score);
+        } else {
+          setCurrentSign('');
+          setDetectionConfidence(0);
+        }
       } else {
+        // Hand is moving too much, skip recognition but keep tracking
+        setDetectionQuality('moving');
         setCurrentSign('');
         setDetectionConfidence(0);
       }
     } else {
       setCurrentSign('');
       setDetectionConfidence(0);
+      setDetectionQuality('none');
+      setHandStability(0);
+      setIsHandStable(false);
+      setHandOrientation(null);
+      previousLandmarksRef.current = null;
     }
   };
 
-  const recognizeGesture = async (landmarks) => {
+  const recognizeGesture = async (landmarks, stabilityConfidence = 1.0) => {
+    // Try enhanced API model first if available
+    if (useEnhancedModel && aslModelRef.current === 'API') {
+      try {
+        // Use normalized landmarks for better prediction
+        const normalizedLandmarks = preprocessForPrediction(landmarks);
+        const formattedLandmarks = formatLandmarksForAPI(normalizedLandmarks);
+        const result = await predictSignAPI(formattedLandmarks);
+
+        // Adjust confidence based on hand stability
+        const adjustedConfidence = result.confidence * stabilityConfidence;
+
+        // Convert to gesture format and filter by confidence
+        if (adjustedConfidence > 0.70) { // 70% confidence threshold with stability factor
+          console.log(`✅ Enhanced Model: ${result.letter} (${(adjustedConfidence * 100).toFixed(1)}%)`);
+          return {
+            name: result.letter.toLowerCase(),
+            score: adjustedConfidence * 10 // Scale to match gesture estimator scores
+          };
+        } else if (result.confidence > 0.50) {
+          // Show detection but don't confirm yet
+          console.log(`⏳ Detected: ${result.letter} (${(result.confidence * 100).toFixed(1)}%) - needs more stability`);
+        }
+      } catch (apiError) {
+        console.warn('API prediction failed, falling back to gesture estimator:', apiError);
+        setUseEnhancedModel(false); // Disable API for this session
+      }
+    }
+
+    // Fallback to gesture estimator
     const GE = new window.fp.GestureEstimator(allGestures);
-    const gesture = await GE.estimate(landmarks, 9.0); // Increased for better accuracy
+    const gesture = await GE.estimate(landmarks, 8.5); // Slightly lower threshold
     if (gesture.gestures.length > 0) {
       // Sort by score to get best matches
       const sortedGestures = gesture.gestures.sort((a, b) => b.score - a.score);
       const bestGesture = sortedGestures[0];
-      
+
+      // Adjust score based on stability
+      const adjustedScore = bestGesture.score * stabilityConfidence;
+
       // Only accept if confidence is high enough and significantly better than second best
-      if (bestGesture.score > 9.0) {
+      if (adjustedScore > 8.5) {
         // If there's a second gesture, ensure the best one is clearly better
         if (sortedGestures.length > 1) {
           const secondBest = sortedGestures[1];
           const scoreDiff = bestGesture.score - secondBest.score;
-          // Require at least 1.5 point difference to avoid confusion
-          if (scoreDiff > 1.5) {
-            return bestGesture;
+          // Require at least 1.2 point difference to avoid confusion
+          if (scoreDiff > 1.2) {
+            console.log(`✅ Gesture Estimator: ${bestGesture.name} (${adjustedScore.toFixed(1)})`);
+            return { ...bestGesture, score: adjustedScore };
           }
         } else {
           // Only one gesture detected with high confidence
-          return bestGesture;
+          console.log(`✅ Gesture Estimator: ${bestGesture.name} (${adjustedScore.toFixed(1)})`);
+          return { ...bestGesture, score: adjustedScore };
         }
       }
     }
@@ -423,9 +534,26 @@ const Sign2Talk = () => {
               <p className="text-white/60 text-[10px] sm:text-xs">AI-Powered Sign Language Assistant</p>
             </div>
           </div>
-          <div className="flex items-center gap-1.5 bg-green-500/20 px-2 py-1 rounded-full border border-green-500/30">
-            <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
-            <span className="text-green-300 text-[10px] sm:text-xs font-medium">Online</span>
+          <div className="flex items-center gap-2">
+            {useEnhancedModel && (
+              <div className="flex items-center gap-1 bg-purple-500/20 px-2 py-1 rounded-full border border-purple-500/30">
+                <span className="text-purple-300 text-[10px] sm:text-xs font-medium">⚡ Enhanced AI</span>
+              </div>
+            )}
+            {isDetecting && detectionQuality === 'moving' && (
+              <div className="flex items-center gap-1 bg-orange-500/20 px-2 py-1 rounded-full border border-orange-500/30 animate-pulse">
+                <span className="text-orange-300 text-[10px] sm:text-xs font-medium">✋ Hold Steady</span>
+              </div>
+            )}
+            {isDetecting && detectionQuality === 'stable' && currentSign && (
+              <div className="flex items-center gap-1 bg-green-500/20 px-2 py-1 rounded-full border border-green-500/30">
+                <span className="text-green-300 text-[10px] sm:text-xs font-medium">✓ Detecting</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 bg-green-500/20 px-2 py-1 rounded-full border border-green-500/30">
+              <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
+              <span className="text-green-300 text-[10px] sm:text-xs font-medium">Online</span>
+            </div>
           </div>
         </div>
       </div>
@@ -481,10 +609,23 @@ const Sign2Talk = () => {
                     </div>
                   </div>
                 )}
-                <div className="absolute bottom-2 right-2">
+                <div className="absolute bottom-2 right-2 flex flex-col gap-1">
                   <div className={`px-2 sm:px-3 py-1 rounded-full backdrop-blur-md font-semibold text-[10px] sm:text-xs ${isDetecting ? 'bg-green-500/80 text-white' : 'bg-yellow-500/80 text-black'}`}>
                     {isDetecting ? '🔴 Live' : '⏸️ Paused'}
                   </div>
+                  {isDetecting && detectionQuality !== 'none' && (
+                    <div className={`px-2 sm:px-3 py-1 rounded-full backdrop-blur-md font-semibold text-[10px] sm:text-xs ${
+                      detectionQuality === 'stable' ? 'bg-green-500/80 text-white' :
+                      detectionQuality === 'moving' ? 'bg-orange-500/80 text-white' :
+                      detectionQuality === 'valid' ? 'bg-blue-500/80 text-white' :
+                      'bg-red-500/80 text-white'
+                    }`}>
+                      {detectionQuality === 'stable' ? '✓ Stable' :
+                       detectionQuality === 'moving' ? '⟳ Moving' :
+                       detectionQuality === 'valid' ? '👌 Valid' :
+                       '⚠ Invalid'}
+                    </div>
+                  )}
                 </div>
               </>
             )}
@@ -530,6 +671,65 @@ const Sign2Talk = () => {
               <p className="text-white/80 text-[9px]">Accuracy</p>
             </div>
           </div>
+
+          {/* Hand Quality Indicators */}
+          {isDetecting && (
+            <div className="bg-white/10 rounded-lg p-2 sm:p-3 border border-white/20">
+              <p className="text-white text-xs mb-2 font-medium">📊 Hand Detection Quality</p>
+              <div className="space-y-2">
+                {/* Stability Meter */}
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-white/70 text-[10px]">Stability</span>
+                    <span className={`text-[10px] font-bold ${isHandStable ? 'text-green-400' : 'text-orange-400'}`}>
+                      {Math.round(handStability * 100)}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-white/20 rounded-full h-2">
+                    <div
+                      className={`h-2 rounded-full transition-all duration-300 ${
+                        handStability > 0.8 ? 'bg-green-500' :
+                        handStability > 0.6 ? 'bg-blue-500' :
+                        handStability > 0.4 ? 'bg-yellow-500' :
+                        'bg-orange-500'
+                      }`}
+                      style={{ width: `${handStability * 100}%` }}
+                    ></div>
+                  </div>
+                </div>
+
+                {/* Hand Orientation */}
+                {handOrientation && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/70 text-[10px]">Hand</span>
+                    <div className="flex items-center gap-1">
+                      <span className="text-white/90 text-[10px] font-medium">
+                        {handOrientation.isRightHand ? '🤚 Right' : '🖐️ Left'}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Detection Status */}
+                <div className="flex items-center justify-between">
+                  <span className="text-white/70 text-[10px]">Status</span>
+                  <div className={`px-2 py-0.5 rounded-full text-[9px] font-medium ${
+                    detectionQuality === 'stable' ? 'bg-green-500/30 text-green-300' :
+                    detectionQuality === 'moving' ? 'bg-orange-500/30 text-orange-300' :
+                    detectionQuality === 'valid' ? 'bg-blue-500/30 text-blue-300' :
+                    detectionQuality === 'invalid' ? 'bg-red-500/30 text-red-300' :
+                    'bg-gray-500/30 text-gray-300'
+                  }`}>
+                    {detectionQuality === 'stable' ? 'Ready to detect' :
+                     detectionQuality === 'moving' ? 'Hold still...' :
+                     detectionQuality === 'valid' ? 'Hand detected' :
+                     detectionQuality === 'invalid' ? 'Invalid pose' :
+                     'No hand detected'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Main Chat Area */}

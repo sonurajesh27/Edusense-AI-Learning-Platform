@@ -362,126 +362,162 @@ const CameraView = ({ isDetecting, onTextUpdate }) => {
     const canvas = handCanvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Clear with white background
+      ctx.fillStyle = 'white';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
   };
 
   const drawHandSkeleton = (landmarks) => {
     const canvas = handCanvasRef.current;
     if (!canvas || !landmarks) return;
-    
+
     const ctx = canvas.getContext('2d');
-    
-    // Clear canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Convert landmarks to keypoints format
-    const keypoints = landmarks.flat().map((coord) => ({
+
+    // Clear with white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Convert landmarks to proper format
+    const points = landmarks.map((coord) => ({
       x: coord[0],
       y: coord[1],
       z: coord[2] || 0
     }));
-    
-    if (!keypoints || keypoints.length < 21) return;
-    
-    // Calculate bounding box for hand
-    const xs = keypoints.map(p => p.x);
-    const ys = keypoints.map(p => p.y);
+
+    if (!points || points.length !== 21) return;
+
+    // Calculate bounding box
+    const xs = points.map(p => p.x);
+    const ys = points.map(p => p.y);
     const minX = Math.min(...xs);
     const maxX = Math.max(...xs);
     const minY = Math.min(...ys);
     const maxY = Math.max(...ys);
-    
+
     const width = maxX - minX;
     const height = maxY - minY;
-    const padding = 50;
-    
-    // Scale and center the hand in the canvas
+    const padding = 60;
+
+    // Scale to fit canvas with proper aspect ratio
     const scale = Math.min(
       (canvas.width - 2 * padding) / width,
       (canvas.height - 2 * padding) / height
     );
-    
+
     const offsetX = (canvas.width - width * scale) / 2 - minX * scale;
     const offsetY = (canvas.height - height * scale) / 2 - minY * scale;
-    
-    // Transform keypoints
-    const transformedPoints = keypoints.map(p => ({
+
+    // Transform all points
+    const transformed = points.map(p => ({
       x: p.x * scale + offsetX,
-      y: p.y * scale + offsetY
+      y: p.y * scale + offsetY,
+      z: p.z
     }));
-    
-    // Draw background gradient
-    const gradient = ctx.createRadialGradient(
-      canvas.width / 2, canvas.height / 2, 0,
-      canvas.width / 2, canvas.height / 2, canvas.width / 2
-    );
-    gradient.addColorStop(0, 'rgba(59, 130, 246, 0.1)');
-    gradient.addColorStop(1, 'rgba(139, 92, 246, 0.05)');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Define finger connections with colors
-    const fingerConnections = {
-      thumb: { points: [[0, 1], [1, 2], [2, 3], [3, 4]], color: '#ef4444' },
-      index: { points: [[0, 5], [5, 6], [6, 7], [7, 8]], color: '#f59e0b' },
-      middle: { points: [[0, 9], [9, 10], [10, 11], [11, 12]], color: '#10b981' },
-      ring: { points: [[0, 13], [13, 14], [14, 15], [15, 16]], color: '#3b82f6' },
-      pinky: { points: [[0, 17], [17, 18], [18, 19], [19, 20]], color: '#8b5cf6' },
-      palm: { points: [[5, 9], [9, 13], [13, 17], [0, 5], [0, 17]], color: '#06b6d4' }
+
+    // Define hand skeleton connections with proper bone structure
+    const skeleton = {
+      // Thumb chain
+      thumb: [[0, 1], [1, 2], [2, 3], [3, 4]],
+      // Index finger chain
+      index: [[0, 5], [5, 6], [6, 7], [7, 8]],
+      // Middle finger chain
+      middle: [[0, 9], [9, 10], [10, 11], [11, 12]],
+      // Ring finger chain
+      ring: [[0, 13], [13, 14], [14, 15], [15, 16]],
+      // Pinky finger chain
+      pinky: [[0, 17], [17, 18], [18, 19], [19, 20]],
+      // Palm connections
+      palm: [[5, 9], [9, 13], [13, 17], [17, 0], [0, 5]]
     };
-    
-    // Draw connections (bones) with glow effect
-    Object.values(fingerConnections).forEach(({ points, color }) => {
-      points.forEach(([start, end]) => {
-        const startPoint = transformedPoints[start];
-        const endPoint = transformedPoints[end];
-        
-        // Glow effect
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = color;
-        
+
+    // Draw bones (connections) with gradient thickness
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Draw each bone segment
+    Object.entries(skeleton).forEach(([fingerName, connections]) => {
+      connections.forEach(([startIdx, endIdx]) => {
+        const start = transformed[startIdx];
+        const end = transformed[endIdx];
+
+        // Calculate bone thickness based on z-depth (3D effect)
+        const avgZ = (start.z + end.z) / 2;
+        const thickness = Math.max(3, 8 - Math.abs(avgZ) / 50);
+
+        // Draw bone shadow for depth
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
+        ctx.lineWidth = thickness + 2;
         ctx.beginPath();
-        ctx.moveTo(startPoint.x, startPoint.y);
-        ctx.lineTo(endPoint.x, endPoint.y);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 4;
-        ctx.lineCap = 'round';
+        ctx.moveTo(start.x + 2, start.y + 2);
+        ctx.lineTo(end.x + 2, end.y + 2);
         ctx.stroke();
-        
-        ctx.shadowBlur = 0;
+
+        // Draw main bone
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
+        ctx.lineWidth = thickness;
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
       });
     });
-    
-    // Draw keypoints (joints)
-    transformedPoints.forEach((point, index) => {
-      // Larger circles for fingertips
+
+    // Draw joints (landmarks)
+    transformed.forEach((point, index) => {
+      // Joint categories
+      const isWrist = index === 0;
       const isTip = [4, 8, 12, 16, 20].includes(index);
-      const radius = isTip ? 8 : 6;
-      
-      // Draw outer glow
-      ctx.shadowBlur = 15;
-      ctx.shadowColor = '#ffffff';
-      
+      const isBase = [1, 5, 9, 13, 17].includes(index);
+      const isPIP = [2, 6, 10, 14, 18].includes(index);
+      const isDIP = [3, 7, 11, 15, 19].includes(index);
+
+      // Determine joint size based on type
+      let radius;
+      if (isWrist) radius = 10;
+      else if (isTip) radius = 8;
+      else if (isBase) radius = 7;
+      else if (isPIP || isDIP) radius = 6;
+      else radius = 5;
+
+      // Draw joint shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
       ctx.beginPath();
-      ctx.arc(point.x, point.y, radius, 0, 2 * Math.PI);
-      ctx.fillStyle = index === 0 ? '#ffffff' : (isTip ? '#fbbf24' : '#60a5fa');
+      ctx.arc(point.x + 2, point.y + 2, radius, 0, Math.PI * 2);
       ctx.fill();
-      
-      // Draw border
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      
-      ctx.shadowBlur = 0;
-      
-      // Draw index labels for key points
-      if (isTip || index === 0) {
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 12px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText(index, point.x, point.y - 12);
+
+      // Draw joint outer ring
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw joint inner highlight
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius - 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw joint center
+      if (isWrist || isTip) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 2, 0, Math.PI * 2);
+        ctx.fill();
       }
+    });
+
+    // Draw landmark numbers for debugging (optional - only for key points)
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Label key landmarks
+    const keyLandmarks = [0, 4, 8, 12, 16, 20]; // Wrist and fingertips
+    keyLandmarks.forEach(index => {
+      const point = transformed[index];
+      ctx.fillText(index.toString(), point.x, point.y - 15);
     });
   };
 
@@ -589,47 +625,21 @@ const CameraView = ({ isDetecting, onTextUpdate }) => {
             </svg>
             Hand Skeleton Detection
           </h3>
-          <div className="relative bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl overflow-hidden aspect-video border border-white/10">
+          <div className="relative bg-white rounded-xl overflow-hidden aspect-video border border-gray-200 shadow-lg">
             <canvas
               ref={handCanvasRef}
               width={640}
               height={480}
-              className="w-full h-full"
+              className="w-full h-full bg-white"
             />
             {!handLandmarks && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+              <div className="absolute inset-0 flex items-center justify-center bg-white">
                 <div className="text-center">
-                  <svg className="w-12 h-12 text-white/30 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-12 h-12 text-gray-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11" />
                   </svg>
-                  <p className="text-white/50 text-sm font-medium">Show your hand</p>
-                  <p className="text-white/30 text-xs mt-1">Skeleton will appear here</p>
-                </div>
-              </div>
-            )}
-
-            {/* Current Detection Badge */}
-            {isDetecting && currentSign && handLandmarks && (
-              <div className="absolute top-4 left-4 right-4">
-                <div className="bg-black/70 backdrop-blur-sm px-4 py-3 rounded-lg border border-white/30 shadow-xl">
-                  <div className="flex items-center justify-center gap-3 mb-2">
-                    <span className="text-5xl">{handShapes[currentSign.replace(/[✓⏳👁️]/g, '').trim().split(' ')[0]] || '✋'}</span>
-                    <p className="text-white text-xl font-bold">{currentSign}</p>
-                  </div>
-                  {aslDescriptions[currentSign.replace(/[✓⏳👁️]/g, '').trim().split(' ')[0]] && (
-                    <p className="text-white/70 text-sm text-center mb-2 italic">
-                      "{aslDescriptions[currentSign.replace(/[✓⏳👁️]/g, '').trim().split(' ')[0]]}"
-                    </p>
-                  )}
-                  <div className="w-full bg-gray-700 rounded-full h-3 overflow-hidden">
-                    <div 
-                      className="bg-gradient-to-r from-green-400 via-blue-500 to-purple-500 h-3 rounded-full transition-all duration-500 ease-out"
-                      style={{ width: `${Math.min(Math.max(confidence * 100, 0), 100)}%`, maxWidth: '100%' }}
-                    ></div>
-                  </div>
-                  <p className="text-white/80 text-xs mt-1 text-center font-medium">
-                    {Math.round(Math.min(confidence * 100, 100))}% Confidence
-                  </p>
+                  <p className="text-gray-500 text-sm font-medium">Show your hand</p>
+                  <p className="text-gray-400 text-xs mt-1">Skeleton will appear here</p>
                 </div>
               </div>
             )}
