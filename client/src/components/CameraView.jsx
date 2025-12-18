@@ -4,6 +4,7 @@ import * as tf from '@tensorflow/tfjs';
 import * as handpose from '@tensorflow-models/handpose';
 import * as fp from 'fingerpose';
 import { allGestures, handShapes, aslDescriptions } from '../utils/aslGestures';
+import gestureDataCollector from '../utils/gestureDataCollector';
 import { io } from 'socket.io-client';
 
 const socket = io('http://localhost:5000');
@@ -117,6 +118,17 @@ const CameraView = ({ isDetecting, onTextUpdate }) => {
         const detectedSign = classifyHandGesture(predictions);
         
         if (detectedSign && detectedSign.confidence > 0.65) {
+          // Capture gesture data for learning
+          gestureDataCollector.captureGesture({
+            landmarks: predictions[0].landmarks,
+            detectedSign: detectedSign.sign,
+            confidence: detectedSign.confidence,
+            recognitionMethod: 'gesture_estimator',
+            timestamp: new Date().toISOString(),
+            sessionContext: 'camera_view',
+            handShape: detectedSign.handShape || null
+          });
+
           // Add to gesture history
           gestureHistoryRef.current.push(detectedSign.sign);
           if (gestureHistoryRef.current.length > 10) {
@@ -157,6 +169,19 @@ const CameraView = ({ isDetecting, onTextUpdate }) => {
             setConfidence(detectedSign.confidence);
           }
         } else {
+          // Capture failed/low confidence recognitions for learning
+          if (detectedSign && predictions[0]) {
+            gestureDataCollector.captureGesture({
+              landmarks: predictions[0].landmarks,
+              detectedSign: detectedSign.sign,
+              confidence: detectedSign.confidence,
+              recognitionMethod: 'gesture_estimator',
+              timestamp: new Date().toISOString(),
+              sessionContext: 'camera_view',
+              lowConfidenceDetection: true
+            });
+          }
+
           setCurrentSign(detectedSign ? `Detecting... (${(detectedSign.confidence * 100).toFixed(0)}%)` : 'Move hand clearly');
           setConfidence(detectedSign?.confidence || 0);
         }

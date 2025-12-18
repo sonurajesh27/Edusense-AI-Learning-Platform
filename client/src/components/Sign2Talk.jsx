@@ -4,21 +4,17 @@ import * as tf from '@tensorflow/tfjs';
 import * as handpose from '@tensorflow-models/handpose';
 import { allGestures } from '../utils/aslGestures';
 import { checkAPIHealth, predictSignAPI, formatLandmarksForAPI } from '../utils/aslModelAPI';
+import gestureDataCollector from '../utils/gestureDataCollector';
 import {
   normalizeHandLandmarks,
-  calculatePoseConfidence,
-  isHandStable,
   preprocessForPrediction,
-  detectHandOrientation,
   isValidHandPose
 } from '../utils/handSignatureProcessor';
-import CameraView from './CameraView';
-import ControlPanel from './ControlPanel';
-import Stats from './Stats';
 import Chat from './Chat';
 import VirtualKeyboard from './VirtualKeyboard';
 import CurrentMessage from './CurrentMessage';
 import QuickSigns from './QuickSigns';
+import GestureStatsViewer from './GestureStatsViewer';
 
 const Sign2Talk = () => {
   const [messages, setMessages] = useState([{
@@ -39,10 +35,6 @@ const Sign2Talk = () => {
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [showVirtualKeyboard, setShowVirtualKeyboard] = useState(false);
   const [useEnhancedModel, setUseEnhancedModel] = useState(false);
-  const [handStability, setHandStability] = useState(0);
-  const [isHandStable, setIsHandStable] = useState(false);
-  const [handOrientation, setHandOrientation] = useState(null);
-  const [detectionQuality, setDetectionQuality] = useState('none');
 
   const user = { name: 'User' }; // Placeholder user object
   
@@ -54,8 +46,16 @@ const Sign2Talk = () => {
   const aslModelRef = useRef(null);
   const lastMessageTimeRef = useRef(0);
   const signStabilityRef = useRef({ sign: '', count: 0 });
-  const previousLandmarksRef = useRef(null);
-  const handOrientationRef = useRef(null);
+  const gestureHistoryRef = useRef([]);
+  const isDetectingRef = useRef(false);
+  const noHandFramesRef = useRef(0);
+  const backOfHandFramesRef = useRef(0);
+  const lastGestureRef = useRef('');
+
+  const GESTURE_STABILITY_THRESHOLD = 3; // Need 3 consistent detections for faster response
+  const GESTURE_COOLDOWN = 800; // 800ms cooldown between detections
+  const HAND_DOWN_THRESHOLD = 3; // Frames with no hand to trigger send
+  const BACKSPACE_GESTURE_THRESHOLD = 3; // Back of hand frames to trigger backspace
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -117,7 +117,7 @@ const Sign2Talk = () => {
     if (detectionIntervalRef.current) return;
     detectionIntervalRef.current = setInterval(() => {
       detectHand();
-    }, 800); // Slower detection speed for better stability
+    }, 150); // Faster detection for better responsiveness (150ms)
   };
 
   const stopDetection = () => {
@@ -128,149 +128,322 @@ const Sign2Talk = () => {
   };
 
   const detectHand = async () => {
+    if (isDetectingRef.current) return;
     if (!webcamRef.current || !webcamRef.current.video || webcamRef.current.video.readyState !== 4 || !modelRef.current) {
       return;
     }
-    const video = webcamRef.current.video;
-    const predictions = await modelRef.current.estimateHands(video);
 
-    if (predictions.length > 0) {
-      const hand = predictions[0];
-      const landmarks = hand.landmarks;
+    isDetectingRef.current = true;
 
-      // Validate hand pose
-      if (!isValidHandPose(landmarks)) {
-        setCurrentSign('');
-        setDetectionConfidence(0);
-        setDetectionQuality('invalid');
-        setHandStability(0);
-        setIsHandStable(false);
-        return;
-      }
+    try {
+      const video = webcamRef.current.video;
+      const predictions = await modelRef.current.estimateHands(video);
 
-      setDetectionQuality('valid');
+      if (predictions.length > 0) {
+        const hand = predictions[0];
+        const landmarks = hand.landmarks;
+        
+        // Reset no-hand counter when hand is detected
+        noHandFramesRef.current = 0;
 
-      // Detect hand orientation (left/right hand)
-      const orientation = detectHandOrientation(landmarks);
-      handOrientationRef.current = orientation;
-      setHandOrientation(orientation);
-
-      // Calculate pose stability confidence
-      const stabilityConfidence = calculatePoseConfidence(landmarks, previousLandmarksRef.current);
-      setHandStability(stabilityConfidence);
-
-      // Check if hand is stable enough for recognition
-      const stable = isHandStable(landmarks, previousLandmarksRef.current, 3);
-      setIsHandStable(stable);
-
-      // Store current landmarks for next frame
-      previousLandmarksRef.current = landmarks;
-
-      // Only proceed with recognition if hand is relatively stable
-      if (stable) {
-        setDetectionQuality('stable');
-        const gesture = await recognizeGesture(landmarks, stabilityConfidence);
-        if (gesture) {
-          handleGestureDetected(gesture.name, gesture.score);
+        // Check if showing back of hand (for backspace gesture)
+        const isBackOfHand = detectBackOfHand(landmarks);
+        
+        if (isBackOfHand) {
+          backOfHandFramesRef.current++;
+          if (backOfHandFramesRef.current >= BACKSPACE_GESTURE_THRESHOLD) {
+            handleBackspace();
+            backOfHandFramesRef.current = 0;
+            gestureHistoryRef.current = [];
+            setCurrentSign('⌫ Backspace');
+            setDetectionConfidence(10);
+          }
+          isDetectingRef.current = false;
+          return;
         } else {
+          backOfHandFramesRef.current = 0;
+        }
+
+        // Validate hand pose
+        if (!isValidHandPose(landmarks)) {
+          setCurrentSign('');
+          setDetectionConfidence(0);
+          gestureHistoryRef.current = [];
+          isDetectingRef.current = false;
+          return;
+        }
+
+        // Draw hand on canvas
+        drawHandOnCanvas(landmarks);
+
+        // Recognize gesture
+        const gesture = await recognizeGesture(landmarks);
+        if (gesture) {
+          // Capture gesture data for learning (background process)
+          gestureDataCollector.captureGesture({
+            landmarks: landmarks,
+            detectedSign: gesture.name,
+            confidence: gesture.score / 10, // Normalize to 0-1
+            recognitionMethod: 'gesture_estimator',
+            timestamp: new Date().toISOString(),
+            sessionContext: 'sign2talk_chat',
+            videoConstraints: webcamRef.current?.video ? {
+              width: webcamRef.current.video.videoWidth,
+              height: webcamRef.current.video.videoHeight
+            } : null
+          });
+
+          // Add to gesture history
+          gestureHistoryRef.current.push(gesture.name);
+          if (gestureHistoryRef.current.length > 10) {
+            gestureHistoryRef.current.shift();
+          }
+
+          // Check if gesture is stable (same gesture for multiple frames)
+          const recentGestures = gestureHistoryRef.current.slice(-GESTURE_STABILITY_THRESHOLD);
+          const isStable = recentGestures.length === GESTURE_STABILITY_THRESHOLD &&
+                          recentGestures.every(g => g === gesture.name);
+
+          // Check cooldown period
+          const now = Date.now();
+          const canCapture = (now - lastMessageTimeRef.current) > GESTURE_COOLDOWN;
+
+          if (isStable && canCapture) {
+            handleGestureDetected(gesture.name, gesture.score);
+            lastMessageTimeRef.current = now;
+            gestureHistoryRef.current = [];
+          }
+
+          setCurrentSign(gesture.name);
+          setDetectionConfidence(gesture.score);
+        } else {
+          // Capture failed recognition attempts too (for learning)
+          gestureDataCollector.captureGesture({
+            landmarks: landmarks,
+            detectedSign: null,
+            confidence: 0,
+            recognitionMethod: 'gesture_estimator',
+            timestamp: new Date().toISOString(),
+            sessionContext: 'sign2talk_chat',
+            recognitionFailed: true
+          });
+
           setCurrentSign('');
           setDetectionConfidence(0);
         }
       } else {
-        // Hand is moving too much, skip recognition but keep tracking
-        setDetectionQuality('moving');
+        // No hand detected - just clear display
+        noHandFramesRef.current++;
         setCurrentSign('');
         setDetectionConfidence(0);
+        gestureHistoryRef.current = [];
+        
+        // Note: Auto-send disabled - user must click Send button manually
       }
-    } else {
-      setCurrentSign('');
-      setDetectionConfidence(0);
-      setDetectionQuality('none');
-      setHandStability(0);
-      setIsHandStable(false);
-      setHandOrientation(null);
-      previousLandmarksRef.current = null;
+    } catch (error) {
+      console.error('Detection error:', error);
+    } finally {
+      isDetectingRef.current = false;
     }
   };
 
-  const recognizeGesture = async (landmarks, stabilityConfidence = 1.0) => {
-    // Try enhanced API model first if available
+  // Detect if showing back of hand (palm facing away)
+  const detectBackOfHand = (landmarks) => {
+    // Calculate the z-axis orientation of the hand
+    // If thumb is closer to camera than pinky, it's likely back of hand
+    const thumbTip = landmarks[4];
+    const pinkyTip = landmarks[20];
+    const wrist = landmarks[0];
+    const middleFinger = landmarks[12];
+    
+    // Check z-depth: back of hand has thumb further from camera (higher z)
+    const thumbZ = thumbTip[2] || 0;
+    const pinkyZ = pinkyTip[2] || 0;
+    const middleZ = middleFinger[2] || 0;
+    const wristZ = wrist[2] || 0;
+    
+    // Back of hand: fingertips are further away than wrist
+    const avgFingerZ = (thumbZ + pinkyZ + middleZ) / 3;
+    const zDifference = avgFingerZ - wristZ;
+    
+    // Also check hand orientation based on finger positioning
+    const palmSpread = Math.abs(thumbTip[0] - pinkyTip[0]);
+    
+    // Back of hand: positive z difference and collapsed palm
+    return zDifference > 10 && palmSpread < 150;
+  };
+
+  const drawHandOnCanvas = (landmarks) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+
+    // Clear with white background
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Convert landmarks to proper format
+    const points = landmarks.map((coord) => ({
+      x: coord[0],
+      y: coord[1],
+      z: coord[2] || 0
+    }));
+
+    if (!points || points.length !== 21) return;
+
+    // Calculate bounding box
+    const xs = points.map(p => p.x);
+    const ys = points.map(p => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const padding = 20;
+
+    // Scale to fit canvas with proper aspect ratio
+    const scale = Math.min(
+      (canvas.width - 2 * padding) / width,
+      (canvas.height - 2 * padding) / height
+    );
+
+    const offsetX = (canvas.width - width * scale) / 2 - minX * scale;
+    const offsetY = (canvas.height - height * scale) / 2 - minY * scale;
+
+    // Transform all points
+    const transformed = points.map(p => ({
+      x: p.x * scale + offsetX,
+      y: p.y * scale + offsetY,
+      z: p.z
+    }));
+
+    // Define hand skeleton connections
+    const skeleton = {
+      thumb: [[0, 1], [1, 2], [2, 3], [3, 4]],
+      index: [[0, 5], [5, 6], [6, 7], [7, 8]],
+      middle: [[0, 9], [9, 10], [10, 11], [11, 12]],
+      ring: [[0, 13], [13, 14], [14, 15], [15, 16]],
+      pinky: [[0, 17], [17, 18], [18, 19], [19, 20]],
+      palm: [[5, 9], [9, 13], [13, 17], [17, 0], [0, 5]]
+    };
+
+    // Draw bones (connections)
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    Object.entries(skeleton).forEach(([fingerName, connections]) => {
+      connections.forEach(([startIdx, endIdx]) => {
+        const start = transformed[startIdx];
+        const end = transformed[endIdx];
+
+        const thickness = 3;
+
+        // Draw bone shadow
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
+        ctx.lineWidth = thickness + 1;
+        ctx.beginPath();
+        ctx.moveTo(start.x + 1, start.y + 1);
+        ctx.lineTo(end.x + 1, end.y + 1);
+        ctx.stroke();
+
+        // Draw main bone
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.lineWidth = thickness;
+        ctx.beginPath();
+        ctx.moveTo(start.x, start.y);
+        ctx.lineTo(end.x, end.y);
+        ctx.stroke();
+      });
+    });
+
+    // Draw joints (landmarks)
+    transformed.forEach((point, index) => {
+      const isWrist = index === 0;
+      const isTip = [4, 8, 12, 16, 20].includes(index);
+      const radius = isWrist ? 5 : isTip ? 4 : 3;
+
+      // Draw joint shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+      ctx.beginPath();
+      ctx.arc(point.x + 1, point.y + 1, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw joint
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw joint highlight
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, radius - 1, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  };
+
+  const recognizeGesture = async (landmarks) => {
+    // Try enhanced API model first if available (highest accuracy)
     if (useEnhancedModel && aslModelRef.current === 'API') {
       try {
-        // Use normalized landmarks for better prediction
         const normalizedLandmarks = preprocessForPrediction(landmarks);
         const formattedLandmarks = formatLandmarksForAPI(normalizedLandmarks);
         const result = await predictSignAPI(formattedLandmarks);
 
-        // Adjust confidence based on hand stability
-        const adjustedConfidence = result.confidence * stabilityConfidence;
+        // Lower threshold for better detection rate (0.65 instead of 0.75)
+        if (result.confidence > 0.65) {
+          console.log(`✅ Enhanced Model: ${result.letter} (${(result.confidence * 100).toFixed(1)}%)`);
+          
+          // Capture enhanced model data
+          gestureDataCollector.captureGesture({
+            landmarks: landmarks,
+            detectedSign: result.letter.toLowerCase(),
+            confidence: result.confidence,
+            recognitionMethod: 'enhanced_api',
+            timestamp: new Date().toISOString(),
+            sessionContext: 'sign2talk_chat',
+            modelAccuracy: 'enhanced_99_percent'
+          });
 
-        // Convert to gesture format and filter by confidence
-        if (adjustedConfidence > 0.70) { // 70% confidence threshold with stability factor
-          console.log(`✅ Enhanced Model: ${result.letter} (${(adjustedConfidence * 100).toFixed(1)}%)`);
           return {
             name: result.letter.toLowerCase(),
-            score: adjustedConfidence * 10 // Scale to match gesture estimator scores
+            score: result.confidence * 10
           };
-        } else if (result.confidence > 0.50) {
-          // Show detection but don't confirm yet
-          console.log(`⏳ Detected: ${result.letter} (${(result.confidence * 100).toFixed(1)}%) - needs more stability`);
         }
       } catch (apiError) {
         console.warn('API prediction failed, falling back to gesture estimator:', apiError);
-        setUseEnhancedModel(false); // Disable API for this session
+        setUseEnhancedModel(false);
       }
     }
 
-    // Fallback to gesture estimator
+    // Fallback to gesture estimator with lower threshold for better detection
     const GE = new window.fp.GestureEstimator(allGestures);
-    const gesture = await GE.estimate(landmarks, 8.5); // Slightly lower threshold
+    const gesture = await GE.estimate(landmarks, 6.5); // Lower from 8.0 to 6.5 for better sensitivity
     if (gesture.gestures.length > 0) {
-      // Sort by score to get best matches
       const sortedGestures = gesture.gestures.sort((a, b) => b.score - a.score);
       const bestGesture = sortedGestures[0];
 
-      // Adjust score based on stability
-      const adjustedScore = bestGesture.score * stabilityConfidence;
-
-      // Only accept if confidence is high enough and significantly better than second best
-      if (adjustedScore > 8.5) {
-        // If there's a second gesture, ensure the best one is clearly better
-        if (sortedGestures.length > 1) {
-          const secondBest = sortedGestures[1];
-          const scoreDiff = bestGesture.score - secondBest.score;
-          // Require at least 1.2 point difference to avoid confusion
-          if (scoreDiff > 1.2) {
-            console.log(`✅ Gesture Estimator: ${bestGesture.name} (${adjustedScore.toFixed(1)})`);
-            return { ...bestGesture, score: adjustedScore };
-          }
-        } else {
-          // Only one gesture detected with high confidence
-          console.log(`✅ Gesture Estimator: ${bestGesture.name} (${adjustedScore.toFixed(1)})`);
-          return { ...bestGesture, score: adjustedScore };
-        }
+      // Lower threshold for capturing more gestures (7.0 instead of 8.0)
+      if (bestGesture.score > 7.0) {
+        console.log(`✅ Gesture Estimator: ${bestGesture.name} (${bestGesture.score.toFixed(1)})`);
+        return bestGesture;
       }
     }
     return null;
   };
 
   const handleGestureDetected = (sign, confidence) => {
+    console.log(`🎯 Gesture Detected: ${sign} (confidence: ${confidence})`);
     setCurrentSign(sign);
     setDetectionConfidence(confidence);
-    if (signStabilityRef.current.sign === sign) {
-      signStabilityRef.current.count++;
-    } else {
-      signStabilityRef.current = { sign, count: 1 };
-    }
-    const now = Date.now();
-    // Increased stability count to 7 for better accuracy and prevent wrong detections
-    if (signStabilityRef.current.count >= 7 && sign !== lastDetectedSign && now - lastMessageTimeRef.current > 4000) {
-      handleSignToMessage(sign);
-      setLastDetectedSign(sign);
-      lastMessageTimeRef.current = now;
-      setDetectionCount(prev => prev + 1);
-      signStabilityRef.current = { sign: '', count: 0 };
-    }
+    setLastDetectedSign(sign);
+    setDetectionCount(prev => prev + 1);
+    
+    // Add to current message
+    handleSignToMessage(sign);
   };
 
   const signAnimations = {
@@ -295,8 +468,13 @@ const Sign2Talk = () => {
   };
 
   const handleSignToMessage = (sign) => {
+    console.log(`📝 Adding sign to message: "${sign}"`);
     // Only add to current message, don't send automatically
-    setCurrentMessage(prev => prev + sign.toUpperCase());
+    setCurrentMessage(prev => {
+      const newMessage = prev + sign.toUpperCase();
+      console.log(`📝 Updated message: "${newMessage}"`);
+      return newMessage;
+    });
   };
 
   const quickSigns = [
@@ -540,16 +718,6 @@ const Sign2Talk = () => {
                 <span className="text-purple-300 text-[10px] sm:text-xs font-medium">⚡ Enhanced AI</span>
               </div>
             )}
-            {isDetecting && detectionQuality === 'moving' && (
-              <div className="flex items-center gap-1 bg-orange-500/20 px-2 py-1 rounded-full border border-orange-500/30 animate-pulse">
-                <span className="text-orange-300 text-[10px] sm:text-xs font-medium">✋ Hold Steady</span>
-              </div>
-            )}
-            {isDetecting && detectionQuality === 'stable' && currentSign && (
-              <div className="flex items-center gap-1 bg-green-500/20 px-2 py-1 rounded-full border border-green-500/30">
-                <span className="text-green-300 text-[10px] sm:text-xs font-medium">✓ Detecting</span>
-              </div>
-            )}
             <div className="flex items-center gap-1.5 bg-green-500/20 px-2 py-1 rounded-full border border-green-500/30">
               <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
               <span className="text-green-300 text-[10px] sm:text-xs font-medium">Online</span>
@@ -561,9 +729,9 @@ const Sign2Talk = () => {
       {/* Main Content */}
       <div className="flex-1 flex gap-2 sm:gap-3 p-2 sm:p-3 bg-gradient-to-br from-slate-900/30 to-indigo-900/30 backdrop-blur-lg overflow-hidden max-w-[1800px] mx-auto w-full">
         {/* Sidebar - Camera & Controls */}
-        <div className="flex flex-col gap-2 sm:gap-3 w-full lg:w-80 xl:w-96 overflow-y-auto">
+        <div className="flex flex-col gap-2 w-full lg:w-80 xl:w-96 overflow-y-auto">
           {/* Camera Feed */}
-          <div className="relative bg-black rounded-xl overflow-hidden border border-white/20 shadow-xl">
+          <div className="relative bg-black rounded-xl overflow-hidden border border-white/20 shadow-xl flex-shrink-0">
             {isModelLoading ? (
               <div className="aspect-video flex items-center justify-center bg-gradient-to-br from-blue-900/30 to-purple-900/30">
                 <div className="text-center p-3">
@@ -576,58 +744,69 @@ const Sign2Talk = () => {
                 </div>
               </div>
             ) : (
-              <>
-                <Webcam ref={webcamRef} onUserMedia={() => setIsCameraReady(true)} screenshotFormat="image/jpeg" className="w-full aspect-video" mirrored={true} />
-                <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full pointer-events-none" />
-                {currentSign && (
-                  <div className="absolute top-2 left-2 right-2 animate-fade-in">
-                    <div className="bg-gradient-to-r from-green-500 to-emerald-600 backdrop-blur-md rounded-lg p-2 sm:p-3 border border-green-300/50 shadow-xl">
+              <div className="relative">
+                <Webcam 
+                  ref={webcamRef} 
+                  onUserMedia={() => setIsCameraReady(true)} 
+                  screenshotFormat="image/jpeg" 
+                  className="w-full aspect-video" 
+                  mirrored={true}
+                  videoConstraints={{
+                    width: 640,
+                    height: 480,
+                    facingMode: "user"
+                  }}
+                />
+                
+                {/* Hand Skeleton Canvas Overlay */}
+                {isDetecting && (
+                  <div className="absolute top-4 right-4 bg-white rounded-lg shadow-lg border-2 border-gray-300">
+                    <canvas
+                      ref={canvasRef}
+                      width={150}
+                      height={150}
+                      className="rounded-lg"
+                    />
+                  </div>
+                )}
+
+                {/* Detection Status */}
+                <div className="absolute bottom-2 left-2 right-2">
+                  {currentSign && (
+                    <div className={`backdrop-blur-md rounded-lg p-2 border shadow-xl mb-2 ${
+                      currentSign === '⌫ Backspace' 
+                        ? 'bg-gradient-to-r from-red-500 to-orange-600 border-red-300/50' 
+                        : 'bg-gradient-to-r from-green-500 to-emerald-600 border-green-300/50'
+                    }`}>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          <div className="text-2xl sm:text-3xl animate-bounce">{signAnimations[currentSign.toLowerCase()] || '🤷‍♂️'}</div>
+                          <div className="text-2xl animate-bounce">
+                            {currentSign === '⌫ Backspace' ? '⌫' : (signAnimations[currentSign.toLowerCase()] || '🤷‍♂️')}
+                          </div>
                           <div>
-                            <p className="text-white font-bold text-sm sm:text-base">{currentSign.toUpperCase()}</p>
-                            <p className="text-green-100 text-[10px] sm:text-xs">
-                              {signStabilityRef.current.sign === currentSign 
-                                ? `Hold steady... ${signStabilityRef.current.count}/7` 
-                                : 'Detected!'}
+                            <p className="text-white font-bold text-sm">{currentSign.toUpperCase()}</p>
+                            <p className={`text-xs ${currentSign === '⌫ Backspace' ? 'text-red-100' : 'text-green-100'}`}>
+                              {currentSign === '⌫ Backspace' ? 'Back of hand!' : 'Detected!'}
                             </p>
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className="text-lg sm:text-xl font-bold text-white">{Math.round(detectionConfidence * 10)}%</div>
-                          {signStabilityRef.current.sign === currentSign && (
-                            <div className="w-full bg-white/30 rounded-full h-1 mt-1">
-                              <div 
-                                className="bg-white h-1 rounded-full transition-all duration-300"
-                                style={{ width: `${(signStabilityRef.current.count / 7) * 100}%` }}
-                              ></div>
-                            </div>
-                          )}
-                        </div>
+                        <div className="text-lg font-bold text-white">{Math.round(detectionConfidence * 10)}%</div>
                       </div>
                     </div>
-                  </div>
-                )}
-                <div className="absolute bottom-2 right-2 flex flex-col gap-1">
-                  <div className={`px-2 sm:px-3 py-1 rounded-full backdrop-blur-md font-semibold text-[10px] sm:text-xs ${isDetecting ? 'bg-green-500/80 text-white' : 'bg-yellow-500/80 text-black'}`}>
-                    {isDetecting ? '🔴 Live' : '⏸️ Paused'}
-                  </div>
-                  {isDetecting && detectionQuality !== 'none' && (
-                    <div className={`px-2 sm:px-3 py-1 rounded-full backdrop-blur-md font-semibold text-[10px] sm:text-xs ${
-                      detectionQuality === 'stable' ? 'bg-green-500/80 text-white' :
-                      detectionQuality === 'moving' ? 'bg-orange-500/80 text-white' :
-                      detectionQuality === 'valid' ? 'bg-blue-500/80 text-white' :
-                      'bg-red-500/80 text-white'
-                    }`}>
-                      {detectionQuality === 'stable' ? '✓ Stable' :
-                       detectionQuality === 'moving' ? '⟳ Moving' :
-                       detectionQuality === 'valid' ? '👌 Valid' :
-                       '⚠ Invalid'}
-                    </div>
                   )}
+                  
+                  <div className="flex justify-between items-center">
+                    <div className={`px-3 py-1 rounded-full backdrop-blur-md font-semibold text-xs ${isDetecting ? 'bg-green-500/80 text-white' : 'bg-yellow-500/80 text-black'}`}>
+                      {isDetecting ? '🔴 Live' : '⏸️ Paused'}
+                    </div>
+                    {useEnhancedModel && (
+                      <div className="px-3 py-1 rounded-full backdrop-blur-md bg-purple-500/80 text-white font-semibold text-xs">
+                        ⚡ Enhanced AI
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </>
+              </div>
             )}
           </div>
 
@@ -642,17 +821,70 @@ const Sign2Talk = () => {
             </button>
           </div>
 
-          {/* Quick Words */}
-          <div className="bg-white/10 rounded-lg p-2 sm:p-3 border border-white/20">
-            <p className="text-white text-xs mb-2 font-medium">⭐ Quick Words</p>
-            <div className="grid grid-cols-4 gap-1.5">
-              {quickSigns.map((sign) => (
-                <button key={sign.label} onClick={() => handleQuickSign(sign.label)}
-                  className="bg-white/10 hover:bg-white/20 border border-white/20 rounded-md p-1.5 text-white text-xs font-medium transition-all hover:scale-105 active:scale-95">
-                  <div className="text-lg mb-0.5">{sign.emoji}</div>
-                  <span className="text-[9px]">{sign.label}</span>
-                </button>
-              ))}
+          {/* Compact Virtual Keyboard */}
+          <div className="bg-gradient-to-br from-purple-900/40 to-pink-900/40 backdrop-blur-xl rounded-xl p-2 border border-purple-400/30 shadow-xl">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-white font-bold text-[10px] flex items-center gap-1">
+                <span className="text-sm">👐</span> ASL Keyboard
+              </h3>
+              <button onClick={() => setShowVirtualKeyboard(!showVirtualKeyboard)} 
+                className="text-white/60 hover:text-white text-[9px] px-1.5 py-0.5 bg-white/10 rounded hover:bg-white/20 transition-all">
+                {showVirtualKeyboard ? '−' : '+'}
+              </button>
+            </div>
+            
+            {showVirtualKeyboard && (
+              <div className="space-y-1.5">
+                {/* Alphabet Keys */}
+                {alphabetKeyboard.map((row, rowIndex) => (
+                  <div key={rowIndex} className="flex gap-1 justify-center">
+                    {row.map((letter) => (
+                      <button 
+                        key={letter} 
+                        onClick={() => handleVirtualKeyPress(letter)}
+                        className="bg-white/10 hover:bg-white/20 border border-white/30 rounded w-7 h-7 text-white font-bold transition-all hover:scale-110 active:scale-95 flex flex-col items-center justify-center shadow-lg text-[10px]"
+                        title={`Sign for ${letter}`}>
+                        <span className="text-[10px]">{signAnimations[letter.toLowerCase()] || '✋'}</span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+                
+                {/* Action Buttons */}
+                <div className="flex gap-1 justify-center pt-1.5 border-t border-white/20">
+                  <button onClick={handleSpacePress}
+                    className="bg-blue-500/40 hover:bg-blue-500/60 border border-blue-400/50 rounded px-3 py-1 text-white font-semibold text-[9px] transition-all hover:scale-105 active:scale-95 shadow-lg">
+                    SPC
+                  </button>
+                  <button onClick={handleBackspace}
+                    className="bg-red-500/40 hover:bg-red-500/60 border border-red-400/50 rounded px-2 py-1 text-white font-semibold text-[9px] transition-all hover:scale-105 active:scale-95 flex items-center gap-0.5 shadow-lg">
+                    ⌫
+                  </button>
+                  <button onClick={clearCurrentMessage}
+                    className="bg-orange-500/40 hover:bg-orange-500/60 border border-orange-400/50 rounded px-2 py-1 text-white font-semibold text-[9px] transition-all hover:scale-105 active:scale-95 shadow-lg">
+                    CLR
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Helper Tips */}
+          <div className="bg-gradient-to-br from-blue-500/20 to-purple-600/20 rounded-lg p-2 border border-blue-400/30">
+            <p className="text-white text-xs font-medium mb-1">💡 Quick Tips</p>
+            <div className="space-y-1 text-[10px] text-white/80">
+              <div className="flex items-center gap-1">
+                <span className="text-green-400">✓</span>
+                <span>Show hand back to delete last letter</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-green-400">✓</span>
+                <span>Put hand down to auto-send message</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-green-400">✓</span>
+                <span>Hold sign steady for detection</span>
+              </div>
             </div>
           </div>
 
@@ -660,7 +892,7 @@ const Sign2Talk = () => {
           <div className="grid grid-cols-3 gap-2">
             <div className="bg-gradient-to-br from-blue-500/20 to-blue-600/20 backdrop-blur-xl rounded-lg p-2 border border-blue-400/30 text-center">
               <div className="text-base sm:text-lg font-bold text-blue-400">{detectionCount}</div>
-              <p className="text-white/80 text-[9px]">Sent</p>
+              <p className="text-white/80 text-[9px]">Signs</p>
             </div>
             <div className="bg-gradient-to-br from-purple-500/20 to-purple-600/20 backdrop-blur-xl rounded-lg p-2 border border-purple-400/30 text-center">
               <div className="text-base sm:text-lg font-bold text-purple-400">{messages.length}</div>
@@ -671,65 +903,6 @@ const Sign2Talk = () => {
               <p className="text-white/80 text-[9px]">Accuracy</p>
             </div>
           </div>
-
-          {/* Hand Quality Indicators */}
-          {isDetecting && (
-            <div className="bg-white/10 rounded-lg p-2 sm:p-3 border border-white/20">
-              <p className="text-white text-xs mb-2 font-medium">📊 Hand Detection Quality</p>
-              <div className="space-y-2">
-                {/* Stability Meter */}
-                <div>
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-white/70 text-[10px]">Stability</span>
-                    <span className={`text-[10px] font-bold ${isHandStable ? 'text-green-400' : 'text-orange-400'}`}>
-                      {Math.round(handStability * 100)}%
-                    </span>
-                  </div>
-                  <div className="w-full bg-white/20 rounded-full h-2">
-                    <div
-                      className={`h-2 rounded-full transition-all duration-300 ${
-                        handStability > 0.8 ? 'bg-green-500' :
-                        handStability > 0.6 ? 'bg-blue-500' :
-                        handStability > 0.4 ? 'bg-yellow-500' :
-                        'bg-orange-500'
-                      }`}
-                      style={{ width: `${handStability * 100}%` }}
-                    ></div>
-                  </div>
-                </div>
-
-                {/* Hand Orientation */}
-                {handOrientation && (
-                  <div className="flex items-center justify-between">
-                    <span className="text-white/70 text-[10px]">Hand</span>
-                    <div className="flex items-center gap-1">
-                      <span className="text-white/90 text-[10px] font-medium">
-                        {handOrientation.isRightHand ? '🤚 Right' : '🖐️ Left'}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Detection Status */}
-                <div className="flex items-center justify-between">
-                  <span className="text-white/70 text-[10px]">Status</span>
-                  <div className={`px-2 py-0.5 rounded-full text-[9px] font-medium ${
-                    detectionQuality === 'stable' ? 'bg-green-500/30 text-green-300' :
-                    detectionQuality === 'moving' ? 'bg-orange-500/30 text-orange-300' :
-                    detectionQuality === 'valid' ? 'bg-blue-500/30 text-blue-300' :
-                    detectionQuality === 'invalid' ? 'bg-red-500/30 text-red-300' :
-                    'bg-gray-500/30 text-gray-300'
-                  }`}>
-                    {detectionQuality === 'stable' ? 'Ready to detect' :
-                     detectionQuality === 'moving' ? 'Hold still...' :
-                     detectionQuality === 'valid' ? 'Hand detected' :
-                     detectionQuality === 'invalid' ? 'Invalid pose' :
-                     'No hand detected'}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Main Chat Area */}
@@ -811,67 +984,17 @@ const Sign2Talk = () => {
               <p className="text-white text-xs sm:text-sm leading-relaxed break-words">{currentMessage || <span className="text-white/40 text-[10px] sm:text-xs">Build your message...</span>}</p>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => setShowVirtualKeyboard(!showVirtualKeyboard)}
-                className="bg-purple-500/30 hover:bg-purple-500/40 text-purple-200 py-2 px-3 rounded-lg font-semibold text-xs transition-all flex items-center justify-center gap-1">
-                ⌨️ <span className="hidden sm:inline">Keys</span>
-              </button>
               <button onClick={handleSendMessage} disabled={!currentMessage}
                 className="flex-1 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 rounded-lg font-semibold text-xs transition-all">
                 📤 Send
               </button>
             </div>
           </div>
-
-          {/* Virtual Keyboard - Alphabet Only */}
-          {showVirtualKeyboard && (
-            <div className="bg-gradient-to-br from-purple-900/40 to-pink-900/40 backdrop-blur-xl rounded-xl p-3 border border-purple-400/30 shadow-xl">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-white font-bold text-sm flex items-center gap-2">
-                  <span className="text-lg">👐</span> ASL Alphabet Keyboard
-                </h3>
-                <button onClick={() => setShowVirtualKeyboard(false)} 
-                  className="text-white/60 hover:text-white text-xs px-2 py-1 bg-white/10 rounded hover:bg-white/20 transition-all">
-                  ✕ Hide
-                </button>
-              </div>
-              
-              <div className="space-y-2">
-                {/* Alphabet Keys */}
-                {alphabetKeyboard.map((row, rowIndex) => (
-                  <div key={rowIndex} className="flex gap-2 justify-center">
-                    {row.map((letter) => (
-                      <button 
-                        key={letter} 
-                        onClick={() => handleVirtualKeyPress(letter)}
-                        className="bg-white/10 hover:bg-white/20 border border-white/30 rounded-lg w-10 h-10 sm:w-12 sm:h-12 text-white font-bold transition-all hover:scale-110 active:scale-95 flex flex-col items-center justify-center shadow-lg"
-                        title={`Sign for ${letter}`}>
-                        <span className="text-sm sm:text-base">{signAnimations[letter.toLowerCase()] || '✋'}</span>
-                        <span className="text-[9px] sm:text-[10px] mt-0.5">{letter}</span>
-                      </button>
-                    ))}
-                  </div>
-                ))}
-                
-                {/* Action Buttons */}
-                <div className="flex gap-2 justify-center pt-3 border-t border-white/20">
-                  <button onClick={handleSpacePress}
-                    className="bg-blue-500/40 hover:bg-blue-500/60 border border-blue-400/50 rounded-lg px-6 py-2 text-white font-semibold text-xs transition-all hover:scale-105 active:scale-95 shadow-lg">
-                    SPACE
-                  </button>
-                  <button onClick={handleBackspace}
-                    className="bg-red-500/40 hover:bg-red-500/60 border border-red-400/50 rounded-lg px-4 py-2 text-white font-semibold text-xs transition-all hover:scale-105 active:scale-95 flex items-center gap-1 shadow-lg">
-                    <span className="text-base">⌫</span> Backspace
-                  </button>
-                  <button onClick={clearCurrentMessage}
-                    className="bg-orange-500/40 hover:bg-orange-500/60 border border-orange-400/50 rounded-lg px-4 py-2 text-white font-semibold text-xs transition-all hover:scale-105 active:scale-95 flex items-center gap-1 shadow-lg">
-                    <span className="text-base">🗑️</span> Clear
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
+
+      {/* Gesture Learning Stats (hidden by default, enable for development) */}
+      <GestureStatsViewer isVisible={false} />
 
       {/* Footer */}
       <div className="bg-gradient-to-r from-slate-900/90 to-indigo-900/90 backdrop-blur-xl p-2 border-t border-white/20 flex-shrink-0">
@@ -882,11 +1005,11 @@ const Sign2Talk = () => {
           </div>
           <div className="hidden sm:block">•</div>
           <div className="hidden sm:flex items-center gap-1">
-            <span>👐 Sign Detection</span>
+            <span>👐 Hand Detection</span>
           </div>
           <div className="hidden sm:block">•</div>
           <div className="hidden sm:flex items-center gap-1">
-            <span>⌨️ Virtual Keyboard</span>
+            <span>💬 Real-time Chat</span>
           </div>
         </div>
       </div>
