@@ -23,8 +23,10 @@ const TouchRead = () => {
   const [mobileStreamData, setMobileStreamData] = useState(null);
   const [useMobileCamera, setUseMobileCamera] = useState(false);
   const [isCameraSwitching, setIsCameraSwitching] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
   const detectionIntervalRef = useRef(null);
   const lastOcrTime = useRef(0);
+  const currentStreamRef = useRef(null);
   const speechSynthesis = window.speechSynthesis;
 
   // Load available cameras
@@ -47,9 +49,13 @@ const TouchRead = () => {
     
     getCameras();
     
-    // Request permissions first to get device labels
+    // Request permissions first to get device labels, then stop immediately
     navigator.mediaDevices.getUserMedia({ video: true })
-      .then(() => getCameras())
+      .then((stream) => {
+        // Stop the stream immediately after getting device info
+        stream.getTracks().forEach(track => track.stop());
+        getCameras();
+      })
       .catch(console.error);
   }, []);
 
@@ -66,12 +72,6 @@ const TouchRead = () => {
       }
     };
     loadModel();
-
-    return () => {
-      if (handModel) {
-        handModel.dispose();
-      }
-    };
   }, []);
 
   // Start reading detection
@@ -87,7 +87,7 @@ const TouchRead = () => {
   const startDetection = () => {
     detectionIntervalRef.current = setInterval(async () => {
       await detectFingerAndRead();
-    }, 200);
+    }, 500); // Reduced frequency for better stability
   };
 
   const stopDetection = () => {
@@ -184,9 +184,9 @@ const TouchRead = () => {
   };
 
   const performOCR = async (imageData) => {
-    // Throttle OCR to every 2 seconds to avoid performance issues
+    // Throttle OCR to every 5 seconds to allow proper reading and sentence formation
     const now = Date.now();
-    if (now - lastOcrTime.current < 2000) {
+    if (now - lastOcrTime.current < 5000) {
       return;
     }
     lastOcrTime.current = now;
@@ -208,19 +208,32 @@ const TouchRead = () => {
         }
       );
 
-      const extractedText = result.data.text.trim();
+      let extractedText = result.data.text.trim();
       
+      // Clean up and format the text better
       if (extractedText && extractedText.length > 0) {
-        setDetectedText(extractedText);
+        // Remove excessive line breaks and clean up spacing
+        extractedText = extractedText
+          .replace(/\n{3,}/g, '\n\n')  // Replace multiple line breaks with double
+          .replace(/\s+/g, ' ')         // Replace multiple spaces with single space
+          .replace(/\n/g, ' ')          // Replace line breaks with spaces for continuous reading
+          .trim();
+        
+        // Only update if we have meaningful text (more than 3 characters)
+        if (extractedText.length > 3) {
+          setDetectedText(extractedText);
+        } else {
+          setDetectedText('Text too short or unclear. Hold finger steady on text.');
+        }
       } else {
-        setDetectedText('No text detected in this area. Try pointing at clearer text.');
+        setDetectedText('No text detected in this area. Try pointing at clearer text with better lighting.');
       }
       
       setIsProcessing(false);
       setOcrProgress(0);
     } catch (error) {
       console.error('OCR Error:', error);
-      setDetectedText('Error reading text. Please try again.');
+      setDetectedText('Error reading text. Please try again with better lighting and focus.');
       setIsProcessing(false);
       setOcrProgress(0);
     }
@@ -244,10 +257,28 @@ const TouchRead = () => {
     speechSynthesis.cancel();
   };
 
-  const handleCameraChange = (deviceId) => {
+  const stopCurrentStream = () => {
+    // Stop any existing camera stream
+    if (currentStreamRef.current) {
+      currentStreamRef.current.getTracks().forEach(track => {
+        track.stop();
+      });
+      currentStreamRef.current = null;
+    }
+    
+    // Also stop webcam ref stream if exists
+    if (webcamRef.current && webcamRef.current.stream) {
+      webcamRef.current.stream.getTracks().forEach(track => {
+        track.stop();
+      });
+    }
+  };
+
+  const handleCameraChange = async (deviceId) => {
     console.log('Switching to camera:', deviceId);
     
     setIsCameraSwitching(true);
+    setCameraError(null);
     
     // Stop detection first
     const wasReading = isReading;
@@ -256,16 +287,26 @@ const TouchRead = () => {
       stopDetection();
     }
     
+    // Stop current camera stream
+    stopCurrentStream();
+    
     // Clear canvas
     clearCanvas();
     setFingerPosition(null);
     setDetectedText('');
     setCapturedImage(null);
     
-    // Update camera
-    setSelectedDeviceId(deviceId);
+    // Temporarily turn off camera to force remount
+    setIsCameraOn(false);
     setShowDeviceSelector(false);
     setUseMobileCamera(false);
+    
+    // Wait a bit for cleanup
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Update camera and turn it back on
+    setSelectedDeviceId(deviceId);
+    setIsCameraOn(true);
     
     // Wait for camera to initialize
     setTimeout(() => {
@@ -277,7 +318,7 @@ const TouchRead = () => {
           setIsReading(true);
         }, 500);
       }
-    }, 1000); // Give camera time to initialize
+    }, 1000);
   };
 
   const handleMobileStreamReceived = (streamData) => {
@@ -309,11 +350,19 @@ const TouchRead = () => {
     }
   }, [selectedDeviceId]);
 
+  // Cleanup camera streams on unmount
+  useEffect(() => {
+    return () => {
+      stopCurrentStream();
+      stopDetection();
+    };
+  }, []);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 p-3 sm:p-4 md:p-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="text-center mb-4 md:mb-8">
+        <div className="text-center mb-4 md:mb-6">
           <h1 className="text-2xl sm:text-3xl md:text-4xl lg:text-5xl font-bold text-white mb-2 md:mb-3 flex items-center justify-center gap-2 md:gap-3">
             <svg className="w-8 h-8 md:w-10 lg:w-12 md:h-10 lg:h-12 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
@@ -323,6 +372,79 @@ const TouchRead = () => {
           </h1>
           <p className="text-white/80 text-sm md:text-base lg:text-lg px-4">Point your finger at text to read it aloud</p>
         </div>
+
+        {/* Camera Selector - Positioned at Top */}
+        {devices.length > 1 && (
+          <div className="flex justify-center mb-4 md:mb-6">
+            {/* Mobile backdrop overlay */}
+            {showDeviceSelector && (
+              <div 
+                className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9998] sm:hidden"
+                onClick={() => setShowDeviceSelector(false)}
+              />
+            )}
+            
+            <div className="relative camera-selector">
+              <button
+                onClick={() => setShowDeviceSelector(!showDeviceSelector)}
+                className="px-6 py-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl font-semibold text-base transition-all duration-300 transform hover:scale-105 shadow-lg flex items-center gap-2"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                </svg>
+                <span>Switch Camera ({devices.length})</span>
+              </button>
+              
+              {showDeviceSelector && (
+                <div className="fixed sm:absolute top-auto bottom-0 sm:top-full sm:bottom-auto left-0 right-0 sm:left-1/2 sm:-translate-x-1/2 bg-gray-800 rounded-t-lg sm:rounded-lg shadow-2xl border border-white/20 z-[99999] sm:min-w-[300px] max-h-[50vh] overflow-y-auto mt-2">
+                  <div className="p-2">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 sm:border-0">
+                      <div className="text-white/60 text-xs font-semibold uppercase">
+                        Select Camera Device
+                      </div>
+                      <button
+                        onClick={() => setShowDeviceSelector(false)}
+                        className="sm:hidden text-white/60 hover:text-white transition-colors"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    {devices.map((device, index) => (
+                      <button
+                        key={device.deviceId}
+                        onClick={() => handleCameraChange(device.deviceId)}
+                        className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 flex items-center gap-3 ${
+                          selectedDeviceId === device.deviceId
+                            ? 'bg-indigo-500 text-white'
+                            : 'text-white/80 hover:bg-white/10'
+                        }`}
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                        </svg>
+                        <div className="flex-1">
+                          <div className="font-medium">
+                            {device.label || `Camera ${index + 1}`}
+                          </div>
+                          {selectedDeviceId === device.deviceId && (
+                            <div className="text-xs text-white/60 mt-0.5">Currently Active</div>
+                          )}
+                        </div>
+                        {selectedDeviceId === device.deviceId && (
+                          <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Control Panel */}
         <div className="bg-white/10 backdrop-blur-md rounded-xl md:rounded-2xl p-3 md:p-6 mb-4 md:mb-6 border border-white/20">
@@ -392,79 +514,6 @@ const TouchRead = () => {
               <span className="sm:hidden">📱 Mobile</span>
             </button>
 
-            {devices.length > 1 && (
-              <>
-                {/* Mobile backdrop overlay */}
-                {showDeviceSelector && (
-                  <div 
-                    className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9998] sm:hidden"
-                    onClick={() => setShowDeviceSelector(false)}
-                  />
-                )}
-                
-                <div className="relative camera-selector w-full sm:w-auto">
-                  <button
-                    onClick={() => setShowDeviceSelector(!showDeviceSelector)}
-                    className="w-full sm:w-auto px-4 sm:px-6 py-3 md:py-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg md:rounded-xl font-semibold text-sm md:text-base transition-all duration-300 transform hover:scale-105 shadow-lg"
-                  >
-                    <svg className="w-5 h-5 md:w-6 md:h-6 inline mr-1 md:mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                    </svg>
-                    <span className="hidden sm:inline">Switch Camera ({devices.length})</span>
-                    <span className="sm:hidden">Camera ({devices.length})</span>
-                  </button>
-                  
-                  {showDeviceSelector && (
-                  <div className="fixed sm:absolute top-auto bottom-0 sm:top-full sm:bottom-auto left-0 right-0 sm:left-0 sm:right-auto bg-gray-800 rounded-t-lg sm:rounded-lg shadow-2xl border border-white/20 z-[9999] sm:min-w-[300px] max-h-[50vh] overflow-y-auto">
-                    <div className="p-2">
-                      <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 sm:border-0">
-                        <div className="text-white/60 text-xs font-semibold uppercase">
-                          Select Camera Device
-                        </div>
-                        <button
-                          onClick={() => setShowDeviceSelector(false)}
-                          className="sm:hidden text-white/60 hover:text-white transition-colors"
-                        >
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      </div>
-                      {devices.map((device, index) => (
-                        <button
-                          key={device.deviceId}
-                          onClick={() => handleCameraChange(device.deviceId)}
-                          className={`w-full text-left px-4 py-3 rounded-lg transition-all duration-200 flex items-center gap-3 ${
-                            selectedDeviceId === device.deviceId
-                              ? 'bg-indigo-500 text-white'
-                              : 'text-white/80 hover:bg-white/10'
-                          }`}
-                        >
-                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                          </svg>
-                          <div className="flex-1">
-                            <div className="font-medium">
-                              {device.label || `Camera ${index + 1}`}
-                            </div>
-                            {selectedDeviceId === device.deviceId && (
-                              <div className="text-xs text-white/60 mt-0.5">Currently Active</div>
-                            )}
-                          </div>
-                          {selectedDeviceId === device.deviceId && (
-                            <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                            </svg>
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                </div>
-              </>
-            )}
-
             {detectedText && (
               <>
                 <button
@@ -513,7 +562,7 @@ const TouchRead = () => {
               )}
             </div>
             <div className="relative bg-black rounded-xl overflow-hidden aspect-video">
-              {isCameraOn && (
+              {isCameraOn && !isCameraSwitching && (
                 <Webcam
                   key={selectedDeviceId} // Force remount when camera changes
                   ref={webcamRef}
@@ -522,13 +571,29 @@ const TouchRead = () => {
                   className="w-full h-full object-cover"
                   mirrored={true}
                   videoConstraints={{
-                    deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 },
-                    facingMode: undefined // Let deviceId take precedence
+                    deviceId: selectedDeviceId || undefined,
+                    width: { min: 640, ideal: 1280, max: 1920 },
+                    height: { min: 480, ideal: 720, max: 1080 }
+                  }}
+                  onUserMedia={(stream) => {
+                    currentStreamRef.current = stream;
+                    setCameraError(null);
+                    console.log('Camera started successfully');
                   }}
                   onUserMediaError={(error) => {
                     console.error('Camera error:', error);
+                    const errorMessage = error.name === 'OverconstrainedError' 
+                      ? 'Camera resolution not supported. Trying default settings...'
+                      : error.message || 'Failed to access camera. Please check permissions.';
+                    setCameraError(errorMessage);
+                    
+                    // If overconstrained, try with default settings
+                    if (error.name === 'OverconstrainedError') {
+                      setTimeout(() => {
+                        setCameraError(null);
+                        setSelectedDeviceId('');
+                      }, 2000);
+                    }
                   }}
                 />
               )}
@@ -542,7 +607,7 @@ const TouchRead = () => {
                 />
               )}
               
-              {!isCameraOn && (
+              {!isCameraOn && !isCameraSwitching && (
                 <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-gray-800 to-gray-900">
                   <div className="text-center">
                     <div className="text-6xl mb-4">📷</div>
@@ -552,12 +617,51 @@ const TouchRead = () => {
                 </div>
               )}
               
+              {cameraError && (
+                <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-red-900/90 to-gray-900/90 backdrop-blur-sm z-20">
+                  <div className="text-center p-6 max-w-md">
+                    <div className="text-6xl mb-4">⚠️</div>
+                    <p className="text-white text-xl font-bold mb-2">Camera Error</p>
+                    <p className="text-white/80 text-sm mb-4">{cameraError}</p>
+                    <div className="flex gap-2 justify-center">
+                      <button
+                        onClick={() => {
+                          stopCurrentStream();
+                          setCameraError(null);
+                          setIsCameraOn(false);
+                          setSelectedDeviceId('');
+                          setTimeout(() => {
+                            if (devices.length > 0) {
+                              setSelectedDeviceId(devices[0].deviceId);
+                            }
+                            setIsCameraOn(true);
+                          }, 500);
+                        }}
+                        className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors"
+                      >
+                        Retry
+                      </button>
+                      <button
+                        onClick={() => {
+                          stopCurrentStream();
+                          setCameraError(null);
+                          setIsCameraOn(false);
+                        }}
+                        className="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
               {!isReading && isCameraOn && !isCameraSwitching && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm">
                   <div className="text-center">
                     <svg className="w-16 h-16 text-white/60 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                    </svg>
+                  </svg>
                     <p className="text-white text-lg font-medium">Reading Paused</p>
                     <p className="text-white/60 text-sm mt-2">Click "Start Reading" to begin</p>
                   </div>
