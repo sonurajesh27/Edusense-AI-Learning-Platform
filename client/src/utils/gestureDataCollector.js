@@ -3,13 +3,14 @@
  * Captures and stores hand gesture data for personalized learning
  * Uses backend SQLite database instead of localStorage for persistence
  */
+import API_URL from './config.js';
 
 class GestureDataCollector {
   constructor() {
     this.isCollecting = false;
     this.sessionId = this.generateSessionId();
     this.userProfile = this.initializeUserProfile();
-    this.apiEndpoint = 'http://localhost:5000/api/gestures'; // Backend endpoint
+    this.apiEndpoint = `${API_URL}/api/gestures`; // Backend endpoint
     this.batchSize = 5; // Send data in smaller batches for responsiveness
     this.pendingBatch = [];
     this.lastSyncTime = Date.now();
@@ -208,7 +209,7 @@ class GestureDataCollector {
 
     // Try to get updated user profile from backend
     try {
-      const response = await fetch(`http://localhost:5000/api/gestures/stats/${this.userProfile.userId}`);
+      const response = await fetch(`${API_URL}/api/gestures/stats/${this.userProfile.userId}`);
       if (response.ok) {
         const data = await response.json();
         console.log('📈 Retrieved user stats from database:', data.stats);
@@ -223,7 +224,7 @@ class GestureDataCollector {
    */
   async getGestureStats() {
     try {
-      const response = await fetch(`http://localhost:5000/api/gestures/stats/${this.userProfile.userId}`);
+      const response = await fetch(`${API_URL}/api/gestures/stats/${this.userProfile.userId}`);
       if (response.ok) {
         const data = await response.json();
         return data.stats;
@@ -247,7 +248,7 @@ class GestureDataCollector {
    */
   async getPersonalizedThreshold(signName) {
     try {
-      const response = await fetch(`http://localhost:5000/api/gestures/thresholds/${this.userProfile.userId}`);
+      const response = await fetch(`${API_URL}/api/gestures/thresholds/${this.userProfile.userId}`);
       if (response.ok) {
         const data = await response.json();
         return data.thresholds[signName] || 0.8; // Default threshold

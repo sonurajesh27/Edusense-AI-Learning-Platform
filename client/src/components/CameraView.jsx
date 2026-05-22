@@ -6,8 +6,9 @@ import * as fp from 'fingerpose';
 import { allGestures, handShapes, aslDescriptions } from '../utils/aslGestures';
 import gestureDataCollector from '../utils/gestureDataCollector';
 import { io } from 'socket.io-client';
+import API_URL from '../utils/config.js';
 
-const socket = io('http://localhost:5000');
+const socket = io(API_URL);
 
 const CameraView = ({ isDetecting, onTextUpdate }) => {
   const webcamRef = useRef(null);

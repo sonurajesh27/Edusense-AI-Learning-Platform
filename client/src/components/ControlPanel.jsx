@@ -1,7 +1,8 @@
 import React from 'react';
 import { io } from 'socket.io-client';
+import API_URL from '../utils/config.js';
 
-const socket = io('http://localhost:5000');
+const socket = io(API_URL);
 
 const ControlPanel = ({ isDetecting, setIsDetecting, isCameraOn, onToggleCamera, onClear }) => {
   const handleStartStop = () => {

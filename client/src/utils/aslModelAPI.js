@@ -3,7 +3,8 @@
  * Now connects to the Node.js server with integrated TensorFlow.js model
  */
 
-const ASL_API_URL = 'http://localhost:5000';
+import API_URL from './config.js';
+const ASL_API_URL = API_URL;
 
 /**
  * Check if the ASL API server is running

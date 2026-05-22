@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import API_URL from '../utils/config.js';
 
 const MobileCameraConnect = ({ onStreamReceived, onClose }) => {
   const [connectionUrl, setConnectionUrl] = useState('');
@@ -19,7 +20,7 @@ const MobileCameraConnect = ({ onStreamReceived, onClose }) => {
     // Fetch network info and ngrok URL from server
     const fetchNetworkInfo = async () => {
       try {
-        const response = await fetch('http://localhost:5000/api/network-info');
+        const response = await fetch(`${API_URL}/api/network-info`);
         const data = await response.json();
         
         let url;
