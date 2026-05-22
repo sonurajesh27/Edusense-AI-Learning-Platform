@@ -79,6 +79,5 @@ Password: demo123
 - Frontend hosted on **Vercel**
 - Backend hosted on **Render**
 
----
 
-Made with ❤️ as a college project.
+
