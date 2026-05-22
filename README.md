@@ -1,6 +1,6 @@
 # EduSense – AI-Powered Sign Language Learning Platform
 
-EduSense is a web app that helps people communicate using sign language. It uses your camera to detect hand gestures in real time and converts them into text. Built for students, caregivers, and anyone who wants to learn or use ASL.
+EduSense is a web app built to bridge the communication gap for specially abled individuals. It uses your camera to detect hand gestures in real time and converts them into text — making it easier for people with hearing or speech impairments to express themselves and interact with the world around them.
 
 🔗 **Live Demo:** [https://edusense-frontend.vercel.app](https://edusense-frontend.vercel.app)
 
